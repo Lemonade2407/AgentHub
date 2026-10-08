@@ -66,3 +66,24 @@ class TraceEventType(StrEnum):
     STATE_UPDATED = "STATE_UPDATED"
     RUN_FINISHED = "RUN_FINISHED"
     RUN_FAILED = "RUN_FAILED"
+
+
+class McpServerStatus(StrEnum):
+    """契约 §2.5 —— MCP Server 连通性状态。
+
+    注意与 `mcp_server.status` 的区分：`UNKNOWN` 为注册后未测试的初始值。
+    """
+
+    UNKNOWN = "UNKNOWN"
+    CONNECTED = "CONNECTED"
+    ERROR = "ERROR"
+
+
+class TransportType(StrEnum):
+    """契约 §2.6 —— MCP Transport。
+
+    V1 仅支持 `streamable_http`；`stdio` 为 P2（本模块对未知 / 不支持的值一律拒绝）。
+    """
+
+    STREAMABLE_HTTP = "streamable_http"
+    STDIO = "stdio"

@@ -9,7 +9,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.core.enums import RiskLevel
+from app.core.enums import McpServerStatus, RiskLevel
 
 
 class ToolDefinition(BaseModel):
@@ -57,5 +57,38 @@ class ToolResult(BaseModel):
     content: list[dict] = Field(default_factory=list)
     text: str = ""
     duration_ms: int = 0
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class McpServerTestResult(BaseModel):
+    """契约 §3.2 —— 连通性测试结果（`POST /api/mcp/servers/{id}/test` 的响应体）。
+
+    业务失败也返回，靠 `ok` 判断；`error_code` 取契约 §1.5 的错误码。
+    """
+
+    ok: bool
+    status: McpServerStatus
+    latency_ms: int
+    server_info: dict | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+class McpDiscoverResult(BaseModel):
+    """契约 §3.2 —— Discovery 结果（`POST /api/mcp/servers/{id}/discover` 的响应体）。
+
+    `added` / `updated` 按 `(server_id, remote_name)` 的 upsert 结果统计；
+    `removed` 为本次未返回而被置 `enabled=false` 的 Tool 数；
+    `total` 为该 Server 当前的 Tool 总数（含已禁用）。
+    """
+
+    server_id: int
+    status: McpServerStatus
+    added: int
+    updated: int
+    removed: int
+    total: int
+    duration_ms: int
     error_code: str | None = None
     error_message: str | None = None
