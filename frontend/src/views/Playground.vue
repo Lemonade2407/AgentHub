@@ -53,29 +53,47 @@ function failMessage(resp: Response): Promise<string> {
     .then((b) => b?.message ?? `HTTP ${resp.status}`)
 }
 
+// 契约 §5.1：后端在 `event:` 字段发送 9 类小写事件名，必须按名监听；
+// `onmessage` 只接收无 `event:` 字段的帧。
+const SSE_EVENT_NAMES = [
+  'run_started',
+  'llm_started',
+  'llm_finished',
+  'tool_candidates',
+  'tool_call_started',
+  'tool_call_finished',
+  'state_updated',
+  'run_finished',
+  'run_failed',
+] as const
+
+function handleEvent(ev: MessageEvent) {
+  let parsed: TraceEvent
+  try {
+    parsed = JSON.parse(ev.data)
+  } catch {
+    return // 心跳等无法解析的帧直接忽略
+  }
+  events.value.push(parsed)
+  // §5.4：以 event_type + stop_reason 判断最终状态，不能只看事件名
+  if (parsed.event_type === 'RUN_FINISHED') {
+    const stopReason = (parsed.data?.stop_reason as string) ?? ''
+    finalOutput.value = (parsed.data?.output as string) ?? null
+    runStatus.value = stopReason === 'MAX_STEPS' ? 'partial' : 'success'
+    closeStream()
+  } else if (parsed.event_type === 'RUN_FAILED') {
+    const stopReason = (parsed.data?.stop_reason as string) ?? ''
+    finalOutput.value = (parsed.data?.partial_output as string) ?? null
+    finalError.value = (parsed.data?.error_message as string) ?? stopReason ?? 'Run 失败'
+    runStatus.value = stopReason === 'CANCELLED' ? 'cancelled' : 'failed'
+    closeStream()
+  }
+}
+
 function openStream(runId: string) {
   es = new EventSource(`/api/runs/${runId}/events`)
-  es.onmessage = (ev) => {
-    let parsed: TraceEvent
-    try {
-      parsed = JSON.parse(ev.data)
-    } catch {
-      return // 心跳等无法解析的帧直接忽略
-    }
-    events.value.push(parsed)
-    // §5.4：以 event_type + stop_reason 判断最终状态，不能只看事件名
-    if (parsed.event_type === 'RUN_FINISHED') {
-      const stopReason = (parsed.data?.stop_reason as string) ?? ''
-      finalOutput.value = (parsed.data?.output as string) ?? null
-      runStatus.value = stopReason === 'MAX_STEPS' ? 'partial' : 'success'
-      closeStream()
-    } else if (parsed.event_type === 'RUN_FAILED') {
-      const stopReason = (parsed.data?.stop_reason as string) ?? ''
-      finalOutput.value = (parsed.data?.partial_output as string) ?? null
-      finalError.value = (parsed.data?.error_message as string) ?? stopReason ?? 'Run 失败'
-      runStatus.value = stopReason === 'CANCELLED' ? 'cancelled' : 'failed'
-      closeStream()
-    }
+  for (const name of SSE_EVENT_NAMES) {
+    es.addEventListener(name, handleEvent as EventListener)
   }
   es.onerror = () => {
     // 连接异常或服务端关闭。run 结束后事件已处理并关闭；此处兜底清理
