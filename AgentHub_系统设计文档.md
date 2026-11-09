@@ -1003,3 +1003,149 @@ Execution Trace
 ```
 
 在保证课程设计完整度的同时，控制功能边界和实现成本。
+
+---
+
+## 25. V2 运行时增补（A：Agent Runtime）
+
+> 本节记录 V2 在 Runtime 侧的增量设计，对应《AgentHub V2 修改意见文档》中的 WP-1.4（模型网关）、WP-2.4（Skill 注入）、WP-3.2（发布快照）、Trace 扩展。V1 的图结构、停止策略与 SSE 语义保持不变。
+
+### 25.1 职责边界
+
+| 模块 | 归属 | 是否访问数据库 | 说明 |
+|---|---|---|---|
+| `ModelGateway` | A | 否 | 接收 D 解密后的 `ModelCredential`，构建/缓存 ChatModel |
+| `SkillResolver` | A | 否 | 接收 D/B 解析后的 `SkillDefinition`，纯函数式组装 |
+| `snapshot` | A（结构）+ D（落库） | 否 | 白名单序列化与脱敏校验 |
+| `RunService` | D | 是 | 读取 `agent` / `agent_skill` / `model_api`，解密后传给 Runner |
+
+原则不变：**Runtime 不持有 ORM 实体、不接触明文密钥的持久化、不依赖 FastAPI。**
+
+### 25.2 模型网关
+
+V1：`build_chat_model(provider/model)` 读取进程级 `LLM_API_KEY` / `LLM_BASE_URL`。
+V2：D 从 `model_api` + `model_api_model` 取出配置，解密 `api_key_cipher` 后构造 `ModelCredential`：
+
+```python
+ModelCredential(
+    provider="deepseek",
+    model_key="deepseek-chat",
+    base_url="https://api.deepseek.com/v1",
+    api_key="<解密后的明文，repr=False>",
+    model_api_id=7,
+    model_api_name="我的 DeepSeek",
+    context_window=64000,
+    supports_tool_call=True,
+)
+```
+
+`ModelGateway.build(credential, require_tool_call=...)` 负责：
+
+1. **缓存**：按 `sha256(provider|base_url|model_key|sha256(api_key)|temperature|timeout)` 缓存客户端，换 Key 不会命中旧连接；
+2. **能力校验**：Agent 绑定了工具但模型 `supports_tool_call=False` 时，运行前直接失败（`MODEL_TOOL_CALL_UNSUPPORTED`）；
+3. **错误归类**：`status_code` / 异常类型映射为 `MODEL_AUTH_ERROR`、`MODEL_NOT_FOUND`、`MODEL_RATE_LIMITED`、`MODEL_TIMEOUT`、`MODEL_UNAVAILABLE`、`MODEL_BAD_REQUEST`；无法归类的仍回落 `MODEL_ERROR`；
+4. **脱敏**：构建期异常信息中的密钥替换为 `***`，`ModelCredential.__repr__` 不输出密钥。
+
+Trace 只记录 `model` / `model_key` / `provider` / `model_api_id` / `model_api_name`，不记录 `base_url` 与任何凭据。
+
+### 25.3 Skill 注入
+
+D 把 `agent_skill` 与 `skill` / `skill_tool` 解析为 `SkillDefinition` 列表（含 `order_no`、`values`、`tools`）。`SkillResolver.resolve()` 的输出：
+
+```text
+final_system_prompt
+    = agent.system_prompt
+    + Σ ("\n\n## Skill: {name} (v{version})\n\n{rendered_instructions}")   # order_no 升序
+
+candidate_tools
+    = agent 显式绑定工具 ∪ Skill 解析成功的工具                     # 按 qualified_name 去重
+```
+
+细则：
+
+| 规则 | 行为 | Trace |
+|---|---|---|
+| 参数渲染 | 只做 `{{name}}` 字符串替换，不做表达式求值 | 未知占位符写 `SKILL_UNKNOWN_PLACEHOLDER` 警告 |
+| 必填参数 | 缺失或类型不合法 → 运行前失败 `SKILL_INVALID_PARAMS` | `RUN_FAILED` |
+| 可选参数 | 无默认值渲染为空串 | — |
+| `required=True` 工具缺失 | 拒绝运行 `SKILL_TOOL_MISSING` | `SKILL_TOOL_MISSING`（FAILED） |
+| `required=False` 工具缺失 | 跳过该工具，继续运行 | `SKILL_TOOL_MISSING`（SKIPPED） |
+| Prompt 预算 | 默认 12000 字符；有 `context_window` 时取 60% | 截断写 `SKILL_PROMPT_TRUNCATED`；放不下写 `SKILL_PROMPT_DROPPED` |
+| 无 Skill | 原样返回 Prompt 与工具集合，行为等同 V1 | 不产生新事件 |
+
+### 25.4 发布快照
+
+`build_agent_snapshot()` 输出白名单结构（`schema_version=1`）：
+
+```json
+{
+  "schema_version": 1,
+  "agent": {"name": "...", "description": "...", "system_prompt": "...", "max_steps": 8, "required_capabilities": ["tool_call"]},
+  "suggested_model": {"provider": "deepseek", "model_key": "deepseek-chat"},
+  "skills": [{"slug": "weekly-report", "version": "1.0.0", "params": {"tone": "正式"}}],
+  "tools": [{"server_name": "git-tools", "remote_name": "list_commits", "transport": "streamable_http", "endpoint": "...", "required": true}]
+}
+```
+
+- 发布前：`dump_snapshot()` 递归扫描敏感字段，命中即抛 `SNAPSHOT_CONTAINS_SECRET`；
+- 安装前：`parse_agent_snapshot()` 先脱敏扫描、再 `extra=forbid` 严格校验、最后校验 `schema_version`；
+- 快照中**永远不出现** `api_key*`、`headers`、`authorization`、`owner_id`、`model_api_id`、内部自增主键；
+- 工具依赖只给定位信息，安装时由 B/D 提示“需先注册同名 MCP Server”，不自动注册。
+
+### 25.5 Trace 增量
+
+新增事件类型（`step_no = 0`）：
+
+| 事件 | 触发 | 关键字段 |
+|---|---|---|
+| `SKILL_INJECTED` | 每个生效 Skill 一条 | `skill_id`、`slug`、`name`、`version`、`order_no`、`prompt_chars`、`tools` |
+| `SKILL_TOOL_MISSING` | 每个缺失工具一条 | `skill_slug`、`tool`、`required`（配合 `status`） |
+
+既有事件的增量字段（全部可选、向后兼容）：
+
+| 事件 | 新增字段 |
+|---|---|
+| `RUN_STARTED` | `model`、`model_key`、`provider`、`model_api_id`、`model_api_name`、`skills`、`skill_warnings` |
+| `LLM_STARTED` / `LLM_FINISHED` | 同上模型字段（`LLM_FINISHED` 的 `error` 增加 `retryable`） |
+| `TOOL_CANDIDATES` | `skills`（生效 Skill 的 slug 列表） |
+| `RUN_FINISHED` | 模型字段与 `skills` |
+
+> **D 侧必须同步**：`agent_step.event_type` 的 `CHECK` 约束在初始 Alembic 迁移中被写死为 V1 的 9 种事件。V2 需新增迁移同步 `SKILL_INJECTED` / `SKILL_TOOL_MISSING`，否则使用 Alembic 建库的环境会在落库时违反约束（`TraceService` 会降级为仅推送，但历史 Trace 会缺失）。
+
+### 25.6 D 侧接入方式
+
+```python
+runner = AgentRunner(
+    gateway=tool_router,
+    tool_selector=TfidfToolSelector(),
+    model_gateway=ModelGateway(),          # 进程级单例，缓存跨 Run 复用
+    top_k=DEFAULT_TOP_K,
+)
+
+result = await runner.run(
+    run_id=run_id,
+    thread_id=thread_id,
+    agent=agent,                            # AgentRead
+    user_input=user_input,
+    max_steps=max_steps,
+    tracer=tracer,
+    skills=skill_definitions,               # 由 skill/agent_skill 解析；无则传 []
+    model_credential=credential,            # 由 model_api 解密；未配置则传 None（回落 V1）
+)
+```
+
+兼容性保证：
+
+1. 不传 `skills` / `model_credential` 时，全部行为与 V1 一致（已有 87 条测试保持通过）；
+2. `ModelConfigError` 仍由 `RunService` 捕获，V1 的 `LLM_AUTH_ERROR` 语义不变；
+3. 新增事件类型与字段均为追加，旧前端忽略未知事件即可。
+
+### 25.7 测试覆盖
+
+| 文件 | 覆盖点 |
+|---|---|
+| `tests/test_model_gateway.py` | 凭据校验、缓存命中/失效、能力校验、错误归类、密钥脱敏、Trace 元信息白名单 |
+| `tests/test_skill_resolver.py` | 无 Skill 回归、顺序、参数渲染与校验、工具合并去重、缺失工具、预算截断与丢弃 |
+| `tests/test_snapshot.py` | 白名单结构、敏感字段扫描、严格解析、版本校验、往返 |
+| `tests/test_agent_runner.py` | Skill 注入、缺失工具快速失败、非法参数快速失败、凭据链路、模型错误归类 |
+

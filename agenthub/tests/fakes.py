@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from app.agent.skills import SkillDefinition, SkillParameter, SkillToolRef
 from app.core.enums import RiskLevel, TraceEventType
 from app.mcp.schemas import ToolCall, ToolContext, ToolDefinition, ToolResult
 from app.schemas.agent import AgentRead
@@ -22,6 +23,36 @@ from app.tools.selector import ToolCandidate
 from app.trace.events import TraceEvent
 
 FIXED_NOW = datetime(2026, 9, 10, 8, 0, tzinfo=UTC)
+
+
+def make_skill(
+    slug: str = "weekly-report",
+    *,
+    name: str | None = None,
+    instructions: str = "请用 {{tone}} 的语气输出周报。",
+    parameters: list[SkillParameter] | None = None,
+    values: dict[str, Any] | None = None,
+    tools: list[SkillToolRef] | None = None,
+    enabled: bool = True,
+    order_no: int = 0,
+    version: str = "1.0.0",
+    skill_id: int | None = None,
+) -> SkillDefinition:
+    """构造 Skill 测试数据；默认带一个 `tone` 参数占位符。"""
+    return SkillDefinition(
+        id=skill_id,
+        slug=slug,
+        name=name or slug,
+        version=version,
+        instructions=instructions,
+        parameters=parameters
+        if parameters is not None
+        else [SkillParameter(name="tone", required=True, default="正式")],
+        values=values or {},
+        tools=tools or [],
+        enabled=enabled,
+        order_no=order_no,
+    )
 
 
 def make_agent(**overrides: Any) -> AgentRead:

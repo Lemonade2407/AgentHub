@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import logging
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from app.agent.graph import RESULT_SUMMARY_LIMIT
+from app.agent.model_gateway import ModelCredential, ModelGateway
 from app.agent.runner import AgentRunner, RunResult
+from app.agent.skills import SkillParameter, SkillToolRef
 from app.core.enums import RunStatus, StepStatus, StopReason, TraceEventType
 from app.mcp.schemas import ToolResult
 from app.schemas.agent import AgentRead
@@ -22,6 +24,7 @@ from tests.fakes import (
     ModelBoom,
     ScriptedChatModel,
     make_agent,
+    make_skill,
     make_tool,
 )
 
@@ -44,11 +47,14 @@ def make_runner(
     gateway: FakeGateway,
     model: ScriptedChatModel,
     selector: FakeSelector | None = None,
+    *,
+    model_gateway: ModelGateway | None = None,
 ) -> AgentRunner:
     return AgentRunner(
         gateway=gateway,
         tool_selector=selector,
         model_factory=lambda _model: model,
+        model_gateway=model_gateway,
     )
 
 
@@ -61,14 +67,19 @@ async def run_agent(
     agent: AgentRead | None = None,
     user_input: str = "问题",
     max_steps: int = 8,
+    skills: list | None = None,
+    model_credential: ModelCredential | None = None,
+    model_gateway: ModelGateway | None = None,
 ) -> RunResult:
-    return await make_runner(gateway, model, selector).run(
+    return await make_runner(gateway, model, selector, model_gateway=model_gateway).run(
         run_id=RUN_ID,
         thread_id=THREAD_ID,
         agent=agent or make_agent(),
         user_input=user_input,
         max_steps=max_steps,
         tracer=tracer,
+        skills=skills or [],
+        model_credential=model_credential,
     )
 
 
@@ -382,3 +393,175 @@ async def test_tool_result_summary_is_truncated_in_trace() -> None:
     assert finished.data["truncated"] is True
     assert len(finished.data["result_summary"]) == RESULT_SUMMARY_LIMIT
     assert finished.data["result_bytes"] == 3000
+
+
+# ---------- V2：Skill 注入 ----------
+
+
+def credential(**overrides: object) -> ModelCredential:
+    base: dict[str, object] = {
+        "provider": "deepseek",
+        "model_key": "deepseek-chat",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key": "sk-test",
+        "model_api_id": 7,
+        "model_api_name": "我的 DeepSeek",
+    }
+    return ModelCredential(**{**base, **overrides})
+
+
+async def test_skill_prompt_and_tools_are_injected() -> None:
+    skill = make_skill(
+        "weekly",
+        name="周报生成",
+        instructions="请用 {{tone}} 的语气。",
+        values={"tone": "轻松"},
+        tools=[SkillToolRef(qualified_name=SEARCH_TOOL, tool=make_tool(SEARCH_TOOL))],
+    )
+    model = ScriptedChatModel(script=[AIMessage(content="好的")])
+    tracer = FakeTracer()
+
+    result = await run_agent(
+        FakeGateway(tools=[]),
+        model,
+        tracer,
+        agent=make_agent(tool_ids=[], system_prompt="你是助理。"),
+        skills=[skill],
+    )
+
+    assert result.status is RunStatus.SUCCESS
+    assert result.output == "好的"
+    # 最终 system prompt = 基座 + Skill 片段（参数已渲染）
+    system_message = model.calls[0][0]
+    assert isinstance(system_message, SystemMessage)
+    assert "你是助理。" in system_message.content
+    assert "## Skill: 周报生成 (v1.0.0)" in system_message.content
+    assert "请用 轻松 的语气。" in system_message.content
+    # Skill 工具进入候选池
+    assert [tool["function"]["name"] for tool in model.bound_tools] == ["search__search_web"]
+
+    injected = tracer.of(TraceEventType.SKILL_INJECTED)[0]
+    assert injected.data["slug"] == "weekly"
+    assert injected.data["tools"] == [SEARCH_TOOL]
+    assert tracer.of(TraceEventType.RUN_STARTED)[0].data["skills"] == ["weekly"]
+
+
+async def test_missing_required_skill_tool_fails_without_calling_model() -> None:
+    skill = make_skill(
+        "gh",
+        instructions="查 issue",
+        tools=[SkillToolRef(qualified_name="ghost.tool", required=True)],
+    )
+    model = ScriptedChatModel(script=[AIMessage(content="不应被调用")])
+    tracer = FakeTracer()
+
+    result = await run_agent(FakeGateway(tools=[]), model, tracer, skills=[skill])
+
+    assert result.status is RunStatus.FAILED
+    assert result.stop_reason is StopReason.TOOL_ERROR
+    assert result.error_code == "SKILL_TOOL_MISSING"
+    assert "ghost.tool" in (result.error_message or "")
+    assert model.calls == []
+    assert tracer.types()[-1] is TraceEventType.RUN_FAILED
+
+    missing = tracer.of(TraceEventType.SKILL_TOOL_MISSING)[0]
+    assert missing.status is StepStatus.FAILED
+    assert missing.data == {"skill_slug": "gh", "tool": "ghost.tool", "required": True}
+
+
+async def test_invalid_skill_params_fail_before_run_started() -> None:
+    skill = make_skill(
+        "bad",
+        instructions="{{tone}}",
+        parameters=[SkillParameter(name="tone", required=True)],
+    )
+    model = ScriptedChatModel(script=[AIMessage(content="不应被调用")])
+    tracer = FakeTracer()
+
+    result = await run_agent(FakeGateway(tools=[]), model, tracer, skills=[skill])
+
+    assert result.status is RunStatus.FAILED
+    assert result.stop_reason is StopReason.MODEL_ERROR
+    assert result.error_code == "SKILL_INVALID_PARAMS"
+    assert model.calls == []
+    assert tracer.types() == [TraceEventType.RUN_FAILED]
+
+
+# ---------- V2：用户级模型凭据 ----------
+
+
+async def test_model_credential_is_traced_without_leaking_key() -> None:
+    model = ScriptedChatModel(script=[AIMessage(content="ok")])
+    tracer = FakeTracer()
+    gateway = ModelGateway(lambda _cred: model)
+
+    result = await run_agent(
+        FakeGateway(tools=[]),
+        model,
+        tracer,
+        agent=make_agent(tool_ids=[]),
+        model_credential=credential(),
+        model_gateway=gateway,
+    )
+
+    assert result.status is RunStatus.SUCCESS
+    started = tracer.of(TraceEventType.RUN_STARTED)[0].data
+    assert started["model_api_id"] == 7
+    assert started["model_api_name"] == "我的 DeepSeek"
+    assert started["model_key"] == "deepseek-chat"
+    assert "api_key" not in started
+
+    llm_started = tracer.of(TraceEventType.LLM_STARTED)[0].data
+    assert llm_started["model_api_name"] == "我的 DeepSeek"
+
+
+async def test_credential_without_gateway_fails_readably() -> None:
+    model = ScriptedChatModel(script=[AIMessage(content="不应被调用")])
+    tracer = FakeTracer()
+
+    result = await run_agent(
+        FakeGateway(tools=[]),
+        model,
+        tracer,
+        agent=make_agent(tool_ids=[]),
+        model_credential=credential(),
+    )
+
+    assert result.status is RunStatus.FAILED
+    assert result.error_code == "MODEL_CONFIG_ERROR"
+    assert "ModelGateway" in (result.error_message or "")
+    assert model.calls == []
+
+
+async def test_model_without_tool_call_capability_is_rejected_when_tools_bound() -> None:
+    model = ScriptedChatModel(script=[AIMessage(content="不应被调用")])
+    tracer = FakeTracer()
+    gateway = ModelGateway(lambda _cred: model)
+
+    result = await run_agent(
+        FakeGateway(tools=[make_tool(SEARCH_TOOL)]),
+        model,
+        tracer,
+        model_credential=credential(supports_tool_call=False),
+        model_gateway=gateway,
+    )
+
+    assert result.status is RunStatus.FAILED
+    assert result.error_code == "MODEL_TOOL_CALL_UNSUPPORTED"
+    assert model.calls == []
+
+
+async def test_auth_error_is_classified() -> None:
+    class AuthError(RuntimeError):
+        status_code = 401
+
+    model = ScriptedChatModel(script=[AuthError("invalid api key")])
+    tracer = FakeTracer()
+
+    result = await run_agent(FakeGateway(tools=[make_tool(SEARCH_TOOL)]), model, tracer)
+
+    assert result.status is RunStatus.FAILED
+    assert result.stop_reason is StopReason.MODEL_ERROR
+    assert result.error_code == "MODEL_AUTH_ERROR"
+    error = tracer.of(TraceEventType.LLM_FINISHED)[0].data["error"]
+    assert error["retryable"] is False

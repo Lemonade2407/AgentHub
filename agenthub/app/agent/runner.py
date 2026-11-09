@@ -2,29 +2,37 @@
 
 职责（对应设计文档 §6.3）：
 1. 加载 AgentDefinition（由调用方通过 `agent` 传入）；
-2. 获取 Agent 已绑定工具；
-3. 调用 ToolSelector 得到 Top-K 候选工具；
-4. 构建 compiled LangGraph；
-5. 使用异步 streaming 执行；
-6. 将执行过程映射为 TraceEvent；
-7. 在成功 / 超限 / 模型错误 / 工具错误时统一结束 Run。
+2. 解析并注入 Skill（V2）：组装最终 system prompt、合并工具、校验参数与依赖；
+3. 获取 Agent 已绑定工具；
+4. 调用 ToolSelector 得到 Top-K 候选工具；
+5. 构建 compiled LangGraph；
+6. 使用异步 streaming 执行；
+7. 将执行过程映射为 TraceEvent；
+8. 在成功 / 超限 / 模型错误 / 工具错误时统一结束 Run。
 
 本模块不依赖 FastAPI、SQLAlchemy 与 Response 对象（设计文档 §3.1），
 因此可被 API 层、测试与脚本直接复用。
+
+V2 新增入参均为可选，不传时行为与 V1 完全一致：
+- `skills`：D 从 `skill` / `agent_skill` 解析出的 Skill 快照；
+- `model_credential`：D 从 `model_api` 解密后传入的凭据；
+- 模型凭据必须配合 `ModelGateway` 使用。
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from app.agent.graph import RunContext, build_graph
+from app.agent.model_gateway import ModelCredential, ModelErrorCode, ModelGateway, ModelGatewayError
 from app.agent.model_provider import build_chat_model
+from app.agent.skills import SkillDefinition, SkillPlan, SkillResolver, SkillValidationError
 from app.agent.state import AgentState
 from app.agent.stop_policy import StopPolicy
 from app.core.enums import RunStatus, StepStatus, StopReason, TraceEventType
@@ -60,6 +68,9 @@ class AgentRunner:
 
     `tool_selector` 为 None 时不做动态筛选，直接把全部绑定工具注入模型；
     该开关对应设计文档 §7 的"动态 Tool Selection 属 P1 可独立开关"。
+
+    `model_gateway` 与 `model_credential` 同时存在时走 V2 的用户级模型链路；
+    否则回落到 `model_factory(agent.model)`（V1 环境变量方案）。
     """
 
     def __init__(
@@ -68,12 +79,16 @@ class AgentRunner:
         gateway: McpToolGateway,
         tool_selector: ToolSelector | None = None,
         model_factory: Callable[[str], BaseChatModel] = build_chat_model,
+        model_gateway: ModelGateway | None = None,
+        skill_resolver: SkillResolver | None = None,
         top_k: int = DEFAULT_TOP_K,
         tool_timeout_ms: int = DEFAULT_TOOL_TIMEOUT_MS,
     ) -> None:
         self._gateway = gateway
         self._selector = tool_selector
         self._model_factory = model_factory
+        self._model_gateway = model_gateway
+        self._skill_resolver = skill_resolver or SkillResolver()
         self._top_k = top_k
         self._tool_timeout_ms = tool_timeout_ms
 
@@ -86,13 +101,36 @@ class AgentRunner:
         user_input: str,
         max_steps: int,
         tracer: TraceSink,
+        skills: Sequence[SkillDefinition] = (),
+        model_credential: ModelCredential | None = None,
     ) -> RunResult:
         started = time.perf_counter()
         policy = StopPolicy(max_steps)
         ctx = RunContext(run_id=run_id, agent_id=agent.id)
+        model_meta = _model_meta(agent, model_credential)
 
         bound_tools = await self._gateway.list_tools(agent_id=agent.id)
-        candidates, scores, strategy = await self._select_tools(user_input, bound_tools)
+        try:
+            plan = self._skill_resolver.resolve(
+                agent_system_prompt=agent.system_prompt,
+                skills=skills,
+                bound_tools=bound_tools,
+                prompt_budget_chars=SkillResolver.budget_from_context_window(
+                    model_credential.context_window if model_credential else None
+                )
+                if model_credential
+                else None,
+            )
+        except SkillValidationError as exc:
+            # 参数契约不满足属于 Agent 定义问题：Run 必须有终态，错误码用于前端给出修复指引
+            return await self._fail(
+                run_id=run_id,
+                tracer=tracer,
+                stop_reason=StopReason.MODEL_ERROR,
+                error_code=exc.code,
+                error_message=_skill_error_message(exc),
+                started=started,
+            )
 
         # Run 级事件统一用 step_no = 0（契约 §3.4）
         await tracer.emit(
@@ -105,10 +143,29 @@ class AgentRunner:
                     "agent_id": agent.id,
                     "input": user_input,
                     "max_steps": max_steps,
-                    "model": agent.model,
+                    **model_meta,
+                    "skills": [item.slug for item in plan.injected],
+                    "skill_warnings": plan.warnings,
                 },
             )
         )
+        await self._emit_skill_events(run_id=run_id, plan=plan, tracer=tracer)
+
+        if plan.missing_required_tools:
+            missing = plan.missing_required_tools
+            return await self._fail(
+                run_id=run_id,
+                tracer=tracer,
+                stop_reason=StopReason.TOOL_ERROR,
+                error_code="SKILL_TOOL_MISSING",
+                error_message=(
+                    "Skill 依赖的 Tool 不可用："
+                    + ", ".join(f"{item.skill_slug}->{item.qualified_name}" for item in missing)
+                ),
+                started=started,
+            )
+
+        candidates, scores, strategy = await self._select_tools(user_input, plan.tools)
         await tracer.emit(
             TraceEvent(
                 run_id=run_id,
@@ -120,19 +177,37 @@ class AgentRunner:
                     "scores": scores,
                     "strategy": strategy,
                     "top_k": self._top_k,
+                    "skills": [item.slug for item in plan.injected],
                 },
             )
         )
 
+        try:
+            model = self._build_model(
+                agent,
+                model_credential,
+                require_tool_call=bool(plan.tools),
+            )
+        except ModelGatewayError as exc:
+            return await self._fail(
+                run_id=run_id,
+                tracer=tracer,
+                stop_reason=StopReason.MODEL_ERROR,
+                error_code=exc.code,
+                error_message=exc.message,
+                started=started,
+            )
+
         graph = build_graph(
-            model=self._model_factory(agent.model),
+            model=model,
             gateway=self._gateway,
             tracer=tracer,
-            agent=agent,
+            agent=agent.model_copy(update={"system_prompt": plan.system_prompt}),
             max_steps=max_steps,
             candidates=candidates,
             ctx=ctx,
             tool_timeout_ms=self._tool_timeout_ms,
+            model_meta=model_meta,
         )
         initial_state: AgentState = {
             "messages": [HumanMessage(content=user_input)],
@@ -180,6 +255,8 @@ class AgentRunner:
                     "llm_calls": ctx.llm_calls,
                     "tool_calls": ctx.tool_calls,
                     "step_count": step_count,
+                    **model_meta,
+                    "skills": [item.slug for item in plan.injected],
                 },
             )
         else:
@@ -211,6 +288,102 @@ class AgentRunner:
             error_message=ctx.error_message,
         )
 
+    def _build_model(
+        self,
+        agent: AgentRead,
+        credential: ModelCredential | None,
+        *,
+        require_tool_call: bool,
+    ) -> BaseChatModel:
+        if credential is None:
+            return self._model_factory(agent.model)
+        if self._model_gateway is None:
+            raise ModelGatewayError(
+                ModelErrorCode.CONFIG,
+                "传入 model_credential 时必须为 AgentRunner 配置 ModelGateway",
+            )
+        return self._model_gateway.build(credential, require_tool_call=require_tool_call)
+
+    async def _emit_skill_events(
+        self,
+        *,
+        run_id: str,
+        plan: SkillPlan,
+        tracer: TraceSink,
+    ) -> None:
+        for item in plan.injected:
+            await tracer.emit(
+                TraceEvent(
+                    run_id=run_id,
+                    step_no=0,
+                    event_type=TraceEventType.SKILL_INJECTED,
+                    status=StepStatus.SUCCESS,
+                    data={
+                        "skill_id": item.skill_id,
+                        "slug": item.slug,
+                        "name": item.name,
+                        "version": item.version,
+                        "order_no": item.order_no,
+                        "prompt_chars": item.prompt_chars,
+                        "tools": item.tools,
+                    },
+                )
+            )
+        for missing in plan.missing_tools:
+            await tracer.emit(
+                TraceEvent(
+                    run_id=run_id,
+                    step_no=0,
+                    event_type=TraceEventType.SKILL_TOOL_MISSING,
+                    status=StepStatus.SKIPPED if not missing.required else StepStatus.FAILED,
+                    data={
+                        "skill_slug": missing.skill_slug,
+                        "tool": missing.qualified_name,
+                        "required": missing.required,
+                    },
+                )
+            )
+
+    async def _fail(
+        self,
+        *,
+        run_id: str,
+        tracer: TraceSink,
+        stop_reason: StopReason,
+        error_code: str,
+        error_message: str,
+        started: float,
+    ) -> RunResult:
+        """运行前置失败（Skill 参数 / 工具依赖 / 模型配置）：发 RUN_FAILED 并返回终态。"""
+        duration_ms = _elapsed_ms(started)
+        await tracer.emit(
+            TraceEvent(
+                run_id=run_id,
+                step_no=0,
+                event_type=TraceEventType.RUN_FAILED,
+                status=StepStatus.FAILED,
+                duration_ms=duration_ms,
+                data={
+                    "stop_reason": stop_reason.value,
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "partial_output": None,
+                },
+            )
+        )
+        return RunResult(
+            run_id=run_id,
+            status=RunStatus.FAILED,
+            stop_reason=stop_reason,
+            output=None,
+            llm_calls=0,
+            tool_calls=0,
+            step_count=0,
+            duration_ms=duration_ms,
+            error_code=error_code,
+            error_message=error_message,
+        )
+
     async def _select_tools(
         self,
         query: str,
@@ -228,6 +401,22 @@ class AgentRunner:
             [candidate.score for candidate in candidates],
             "tfidf",
         )
+
+
+def _model_meta(agent: AgentRead, credential: ModelCredential | None) -> dict[str, object]:
+    """Trace 中的模型标识：V2 走凭据信息，V1 退化为 `agent.model`。"""
+    if credential is not None:
+        return credential.trace_meta()
+    return {"model": agent.model}
+
+
+def _skill_error_message(exc: SkillValidationError) -> str:
+    parts = [exc.message]
+    if exc.param:
+        parts.append(f"参数：{exc.param}")
+    if exc.skill_slug:
+        parts.append(f"Skill：{exc.skill_slug}")
+    return "；".join(parts)[:512]
 
 
 def _elapsed_ms(started: float) -> int:

@@ -21,6 +21,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from app.agent.model_gateway import classify_model_error
 from app.agent.state import AgentState
 from app.agent.stop_policy import StopPolicy
 from app.core.enums import StepStatus, StopReason, TraceEventType
@@ -112,11 +113,15 @@ def build_graph(
     candidates: list[ToolDefinition],
     ctx: RunContext,
     tool_timeout_ms: int = 30_000,
+    model_meta: dict[str, Any] | None = None,
 ) -> CompiledStateGraph:
     """构建并编译单次 Run 使用的图。
 
     每次 Run 都会新建图：候选工具、`RunContext`、模型绑定都与该次 Run 一一对应。
     Checkpointer 使用内存实现（设计文档 §6.5），`thread_id` 由 Runner 传入。
+
+    `model_meta` 为写入 Trace 的模型标识（V2 含 model_api_id / model_api_name / model_key），
+    默认退化为 V1 的 `agent.model`。
     """
     policy = StopPolicy(max_steps)
     codec = ToolNameCodec(candidates)
@@ -124,6 +129,7 @@ def build_graph(
     bound_model = model.bind_tools(schemas) if schemas else model
     system_message = SystemMessage(agent.system_prompt) if agent.system_prompt else None
     candidate_names = [tool.qualified_name for tool in candidates]
+    llm_meta: dict[str, Any] = model_meta or {"model": agent.model}
 
     def _prompt_messages(history: list[BaseMessage]) -> list[BaseMessage]:
         """System Prompt 属于 AgentDefinition，不进 `AgentState.messages`。"""
@@ -141,7 +147,7 @@ def build_graph(
                 status=StepStatus.RUNNING,
                 node=MODEL_NODE,
                 data={
-                    "model": agent.model,
+                    **llm_meta,
                     "message_count": len(history),
                     "candidate_tools": candidate_names,
                 },
@@ -154,7 +160,8 @@ def build_graph(
         except Exception as exc:  # 契约 §6.4 MODEL_ERROR：模型超时 / 鉴权 / 配额 / 解析错误
             ctx.llm_calls += 1
             ctx.stop_reason = StopReason.MODEL_ERROR
-            ctx.error_code = "MODEL_ERROR"
+            error_code, retryable = classify_model_error(exc)
+            ctx.error_code = error_code
             ctx.error_message = f"{type(exc).__name__}: {exc}"[:512]
             await tracer.emit(
                 TraceEvent(
@@ -165,8 +172,12 @@ def build_graph(
                     node=MODEL_NODE,
                     duration_ms=_elapsed_ms(started),
                     data={
-                        "model": agent.model,
-                        "error": {"code": ctx.error_code, "message": ctx.error_message},
+                        **llm_meta,
+                        "error": {
+                            "code": ctx.error_code,
+                            "message": ctx.error_message,
+                            "retryable": retryable,
+                        },
                     },
                 )
             )
@@ -193,7 +204,7 @@ def build_graph(
                 node=MODEL_NODE,
                 duration_ms=duration_ms,
                 data={
-                    "model": agent.model,
+                    **llm_meta,
                     "token_usage": _token_usage(response),
                     "finish_reason": _finish_reason(response),
                     "tool_call_count": tool_call_count,
