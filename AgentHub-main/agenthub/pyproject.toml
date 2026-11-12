@@ -1,0 +1,30 @@
+[project]
+name = "agenthub"
+version = "0.1.0"
+description = "AgentHub —— 面向 Agent 开发者的轻量级 MCP Agent 构建、运行与调试平台"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.14",
+    "asyncpg>=0.30",
+    "cryptography>=43.0",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "langgraph>=0.2.60",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "uvicorn[standard]>=0.30",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
