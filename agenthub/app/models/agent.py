@@ -33,6 +33,13 @@ class Agent(TimestampMixin, Base):
             "created_at",
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        # V2：列表按 owner 过滤 + created_at 倒序（替换 V1 全表扫描路径）
+        Index(
+            "idx_agent_owner_created_active",
+            "owner_id",
+            text("created_at DESC"),
+            postgresql_where=text("deleted_at IS NULL"),
+        ),
         {"comment": "Agent 持久化配置（AgentDefinition）"},
     )
 
@@ -45,6 +52,20 @@ class Agent(TimestampMixin, Base):
     max_steps: Mapped[int] = mapped_column(SmallInteger, server_default=text("8"))
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ---- V2 新增（修改意见 §3.2，过渡期兼容）----
+    # 资源归属；local 模式下统一指向内置 local 用户。历史数据由 0002 迁移回填
+    owner_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("app_user.id"),
+    )
+    # 引用的模型 API；NULL 表示 V1 legacy Agent，继续走环境变量路径
+    model_api_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        # 被引用时禁止物理删除 Model API，只允许 enabled=false
+        ForeignKey("model_api.id", ondelete="RESTRICT"),
+    )
+    # 该 API 下的具体模型名；读路径优先 model_api_id + model_key，写路径双写 model
+    model_key: Mapped[str | None] = mapped_column(String(128))
 
 
 class AgentTool(Base):

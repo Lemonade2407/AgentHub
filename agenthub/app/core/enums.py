@@ -90,3 +90,61 @@ class TransportType(StrEnum):
 
     STREAMABLE_HTTP = "streamable_http"
     STDIO = "stdio"
+
+
+# ---------------------------------------------------------------------------
+# V2 新增枚举（修改意见文档 §3.2 / §4.3 / §5.3）
+#
+# 注意：V2 新表的枚举值统一采用**小写 snake**（与修改意见草案一致），
+# 不再沿用 V1 的 UPPER_SNAKE；V1 既有表的枚举值保持不变。
+# ---------------------------------------------------------------------------
+
+
+class UserStatus(StrEnum):
+    """`app_user.status` —— 账号状态。"""
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+
+
+class ModelProvider(StrEnum):
+    """`model_api.provider` —— 模型提供方；`custom` 表示自建网关 / 代理。"""
+
+    DEEPSEEK = "deepseek"
+    OPENAI = "openai"
+    QWEN = "qwen"
+    CUSTOM = "custom"
+
+
+class SkillVisibility(StrEnum):
+    """`skill.visibility` —— 公开 / 私有。"""
+
+    PRIVATE = "private"
+    PUBLIC = "public"
+
+
+class SkillStatus(StrEnum):
+    """`skill.status` —— Skill 生命周期状态。"""
+
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    ARCHIVED = "archived"
+
+
+class SkillCategory(StrEnum):
+    """`skill.category` 与 `agent_publication.category`。"""
+
+    GENERAL = "general"
+    WRITING = "writing"
+    CODING = "coding"
+    DATA = "data"
+    RESEARCH = "research"
+    OPS = "ops"
+
+
+class PublicationStatus(StrEnum):
+    """`agent_publication.status` —— 发布快照生命周期状态。"""
+
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    OFFLINE = "offline"

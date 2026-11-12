@@ -2,9 +2,9 @@
 
 > **项目名称：AgentHub**
 > **文档类型：数据库详细设计（Database Design）**
-> **版本：V1.0 MVP · DB Design v1.2（对齐 Contract v1.3）**
-> **上游文档：AgentHub_系统设计文档.md（§10）、AgentHub_接口契约文档.md**
-> **日期：2026 年 9 月**
+> **版本：V2.0 · DB Design v2.0（对齐 Contract v2.0，含 V2 修改意见 §3.2 / §4.3 / §5.3）**
+> **上游文档：AgentHub_系统设计文档.md（§10）、AgentHub_接口契约文档.md、AgentHub_V2_修改意见文档.md**
+> **日期：2026 年 11 月（V2.0）；2026 年 9 月（V1.0）**
 > **目标数据库：PostgreSQL 16**
 
 ---
@@ -25,9 +25,9 @@
 
 ### 0.3 范围内 / 范围外
 
-**范围内**：6 张表的逻辑与物理设计、完整 DDL、索引、JSONB 结构、Alembic 迁移、事务与超时约定、DTO↔列映射。
+**范围内**：V1 的 6 张表 + V2 新增的 9 张表（`app_user`、`model_api`、`model_api_model`、`skill`、`skill_tool`、`agent_skill`、`agent_publication`、`publication_like`、`publication_install`）与 `agent` 表变更；逻辑与物理设计、完整 DDL、索引、JSONB 结构、Alembic 迁移与 V1→V2 回填、事务与超时约定、DTO↔列映射。
 
-**范围外**：不涉及 Redis / 消息队列 / 向量库 / 分区表 / 物化视图 / 全文检索（依据设计文档 §2.2 约束）；不做多租户与复杂 RBAC。
+**范围外**：不涉及 Redis / 消息队列 / 向量库 / 分区表 / 物化视图 / 全文检索（依据设计文档 §2.2 约束）；不做多租户与复杂 RBAC（修改意见 §1.3）；V2 不做头像/图片上传（修改意见 Q7）。
 
 ---
 
@@ -44,8 +44,8 @@
 | 索引 | `idx_<表>_<列...>` |
 | 字符集 / 排序 | UTF8 / `en_US.UTF-8`（无需 locale 相关排序） |
 | 时间 | 全部 `timestamptz`，**统一存 UTC**，展示层按 `Asia/Shanghai` 换算 |
-| 枚举 | `varchar` + `CHECK` 约束，**不使用 PostgreSQL ENUM 类型**（理由见 §9 D-DB1） |
-| 布尔 | `boolean NOT NULL DEFAULT`，禁止 nullable 布尔 |
+| 枚举 | `varchar` + `CHECK` 约束，**不使用 PostgreSQL ENUM 类型**（理由见 §9 D-DB1）。V1 既有表取值保持 UPPER_SNAKE；**V2 新表取值统一小写 snake**（与 V2 修改意见草案冻结值一致，见 §9 D-DB11） |
+| 布尔 | `boolean NOT NULL DEFAULT`，禁止 nullable 布尔；唯一例外 `model_api.last_test_ok`（未测试过为 NULL，三态语义） |
 | 金额/计数 | `integer`（本系统无金额） |
 | 软删除 | 仅 `agent` 使用 `deleted_at`；其余资源用 `enabled` 置位（见 §9 D-DB4） |
 | `updated_at` | 由应用层 `onupdate=func.now()` 维护，**不建触发器**（见 §9 D-DB5） |
@@ -162,7 +162,35 @@ erDiagram
     }
 ```
 
-### 2.1 实体数量级估算
+### 2.1 V2 增量关系（新增于 v2.0）
+
+```mermaid
+erDiagram
+    APP_USER ||--o{ MODEL_API : owns
+    MODEL_API ||--o{ MODEL_API_MODEL : lists
+    APP_USER ||--o{ SKILL : owns
+    SKILL ||--o{ SKILL_TOOL : binds
+    MCP_TOOL ||--o{ SKILL_TOOL : assigned
+    AGENT ||--o{ AGENT_SKILL : mounts
+    SKILL ||--o{ AGENT_SKILL : mounted_by
+    APP_USER ||--o{ AGENT_PUBLICATION : publishes
+    AGENT ||--o| AGENT_PUBLICATION : source_of
+    AGENT_PUBLICATION ||--o{ PUBLICATION_LIKE : liked
+    APP_USER ||--o{ PUBLICATION_LIKE : likes
+    AGENT_PUBLICATION ||--o{ PUBLICATION_INSTALL : installed
+    APP_USER ||--o{ PUBLICATION_INSTALL : installs
+    APP_USER ||--o{ AGENT : owns
+    MODEL_API ||--o{ AGENT : referenced_by
+```
+
+V2 关系要点：
+
+- **一切资源归 `app_user`**：`agent` / `model_api` / `skill` / `agent_publication` 均以 `owner_id` 隔离（修改意见 §8：跨用户访问返回 404）。
+- **`agent.model_api_id` 只引用、不级联**：`ON DELETE RESTRICT`，Model API 被引用时禁止物理删除（§3.8）。
+- **快照与源解耦**：`agent_publication.source_agent_id` / `publication_install.installed_agent_id` 均 `ON DELETE SET NULL`，源 Agent 删除不影响已发布快照与安装记录。
+- **Skill 删除受挂载保护**：`agent_skill.skill_id` 为 `ON DELETE RESTRICT`，被挂载的 Skill 删除返回 409（契约 `SKILL_IN_USE`）。
+
+### 2.2 实体数量级估算
 
 | 表 | 量级（课程演示） | 主要增长来源 |
 |---|---:|---|
@@ -172,6 +200,13 @@ erDiagram
 | `agent_tool` | 十级 | 绑定操作 |
 | `agent_run` | 百~千级 | 每次 Playground 运行 |
 | `agent_step` | 万级 | 每 Run 约 10~15 行 |
+| `app_user` | 个位~十级 | 注册（V2） |
+| `model_api` | 十级 | 每用户 1~5 条（V2） |
+| `model_api_model` | 十级 | 每条 API 1~10 个模型（V2） |
+| `skill` | 十~百级 | 创建 + 广场安装副本（V2） |
+| `skill_tool` / `agent_skill` | 十~百级 | 绑定/挂载操作（V2） |
+| `agent_publication` | 十级 | 发布动作，低频（V2） |
+| `publication_like` / `publication_install` | 百级 | 点赞/安装动作（V2） |
 
 **结论**：全部为小表，不需要分区、归档与只读副本；索引按访问路径精确建即可。
 
@@ -193,6 +228,9 @@ erDiagram
 | `deleted_at` | timestamptz | 是 | NULL | 软删除标记（契约 §4.1.5） |
 | `created_at` | timestamptz | 否 | `now()` | — |
 | `updated_at` | timestamptz | 否 | `now()` | 应用层维护 |
+| **`owner_id`**（V2） | bigint | 是 | NULL | FK → `app_user.id`。资源归属；local 模式下统一指向内置 local 用户。NULL 仅存在于迁移窗口期，回填后应用层保证非空 |
+| **`model_api_id`**（V2） | bigint | 是 | NULL | FK → `model_api.id`，`ON DELETE RESTRICT`。NULL 表示 V1 legacy Agent，继续走环境变量路径 |
+| **`model_key`**（V2） | varchar(128) | 是 | NULL | 该 API 下的具体模型名；读路径优先 `model_api_id + model_key`，写路径与 `model` 双写一个版本 |
 
 **约束**
 
@@ -200,17 +238,22 @@ erDiagram
 |---|---|---|
 | `pk_agent` | PK | `(id)` |
 | `ck_agent_max_steps` | CHECK | `max_steps BETWEEN 1 AND 20` |
+| `fk_agent_owner_id`（V2） | FK | `(owner_id) → app_user(id)`，无级联（禁用账号不删资源） |
+| `fk_agent_model_api_id`（V2） | FK | `(model_api_id) → model_api(id) ON DELETE RESTRICT` |
 
 **索引**
 
 | 名称 | 列 | 类型 | 服务的查询 |
 |---|---|---|---|
-| `idx_agent_created_at_active` | `(created_at DESC) WHERE deleted_at IS NULL` | 部分索引 | §4.1.2 Agent 列表（默认按 `-created_at` 排序、过滤软删除） |
+| `idx_agent_created_at_active` | `(created_at DESC) WHERE deleted_at IS NULL` | 部分索引 | §4.1.2 Agent 列表（默认按 `-created_at` 排序、过滤软删除）；V2 保留一个版本 |
+| `idx_agent_owner_created_active`（V2） | `(owner_id, created_at DESC) WHERE deleted_at IS NULL` | 部分索引 | V2 列表按 owner 过滤 + 倒序；覆盖旧索引的查询路径 |
 
 **设计说明**
 
 - 列表接口的 `enabled` 过滤与 `keyword` 模糊匹配不建索引：数据量为十级，顺序扫描更快，避免无效索引。
 - `deleted_at` 用部分索引而非复合索引，因为软删除过滤是恒定条件。
+- **`model` 列保留一个版本**（修改意见 §3.2 回填规则 3）：V2 读路径优先 `model_api_id + model_key`，写路径双写；V3 再评估下线。
+- **`owner_id` / `model_api_id` 允许 NULL 是刻意的**：历史 Agent 与「未配置模型」状态需要可表达的落库形态，由应用层把 NULL 映射为 legacy 行为，而不是用魔法值。
 
 ### 3.2 `mcp_server` —— MCP Server 配置
 
@@ -392,6 +435,217 @@ erDiagram
 - **`(run_id, step_no)` 绝不可加 UNIQUE 约束**。同一个 `step_no` 会产生多条事件（例如 `LLM_STARTED` 与 `LLM_FINISHED` 共享同一 `step_no`，见契约 §5.4 示例），事件的唯一性由自增 `id` 保证，`step_no` 只用于分组与排序。
 - **不建 `payload` 的 GIN 索引**：V1 没有按 payload 内容检索的需求，GIN 索引会显著放大写入成本，得不偿失。
 - **不给 `payload` 加体积 CHECK**：契约 §7 规定超过 64 KB 由应用层裁剪；若用 DB 约束拦截，一旦 Trace 写入异常会直接报错，违背"Trace 降级不阻断 Runtime"的原则。
+- **V2 `event_type` 扩充**：CHECK 新增 `SKILL_INJECTED` / `SKILL_TOOL_MISSING`（Skill 注入与缺失工具事件，`step_no = 0`），由迁移 `0002_v2_schema` 删建约束完成，既有数据不受影响。
+
+### 3.7 `app_user` —— 平台账号（V2 新增）
+
+| 列 | 类型 | NULL | 默认 | 说明 |
+|---|---|:--:|---|---|
+| `id` | bigint | 否 | identity | 主键 |
+| `email` | varchar(128) | 否 | — | 登录标识，唯一 |
+| `display_name` | varchar(64) | 否 | — | 展示名 |
+| `password_hash` | varchar(255) | 否 | — | 口令散列；内置 local 用户为占位串 `'!locked'`，任何密码都不会命中 |
+| `status` | varchar(16) | 否 | `'active'` | `active` \| `disabled`；禁用即不可登录，资源保留 |
+| `created_at` | timestamptz | 否 | `now()` | — |
+| `updated_at` | timestamptz | 否 | `now()` | 应用层维护 |
+
+**约束**
+
+| 名称 | 类型 | 定义 |
+|---|---|---|
+| `pk_app_user` | PK | `(id)` |
+| `uq_app_user_email` | UNIQUE | `(email)` → 冲突返回契约错误码 `EMAIL_TAKEN` |
+| `ck_app_user_status` | CHECK | `status IN ('active','disabled')` |
+
+**设计说明**
+
+- V2 最小账号体系（修改意见 §1.2）：无角色、无权限矩阵，权限表达为"资源按 `owner_id` 过滤"。
+- **不建除 UNIQUE 外的索引**：登录按 email 精确命中 UNIQUE 索引，量级为个位~十级。
+- **不提供物理删除**：用户停用走 `status='disabled'`；`agent.owner_id` 等 FK 均无级联，删除用户会因 FK 被拦，这是刻意保护（Run/Publication 是审计与社区资产）。
+
+### 3.8 `model_api` —— 用户级模型接入配置（V2 新增）
+
+| 列 | 类型 | NULL | 默认 | 说明 |
+|---|---|:--:|---|---|
+| `id` | bigint | 否 | identity | 主键 |
+| `owner_id` | bigint | 否 | — | FK → `app_user.id`，`ON DELETE CASCADE` |
+| `name` | varchar(64) | 否 | — | 用户自定义名，如"我的 DeepSeek" |
+| `provider` | varchar(32) | 否 | — | `deepseek` \| `openai` \| `qwen` \| `custom` |
+| `base_url` | varchar(512) | 否 | — | 上游地址（自建网关可填任意地址） |
+| `api_key_cipher` | text | 否 | — | **Fernet 密文，禁止明文入库**；任何接口不回传（修改意见 §3.5） |
+| `api_key_hint` | varchar(16) | 是 | NULL | 仅密钥末 4 位（如 `abcd`），界面展示为 `****abcd`；无法反推原 Key |
+| `is_default` | boolean | 否 | `false` | 用户的默认 Model API，新建 Agent 默认选中 |
+| `enabled` | boolean | 否 | `true` | 被 Agent 引用时禁止物理删除，只允许置 `false` |
+| `last_test_at` | timestamptz | 是 | NULL | 最近连通性测试时间 |
+| `last_test_ok` | boolean | 是 | NULL | 三态：NULL=未测试 / true / false |
+| `last_error` | varchar(512) | 是 | NULL | 最近失败摘要（已脱敏、已截断） |
+| `created_at` / `updated_at` | timestamptz | 否 | `now()` | — |
+
+**约束与索引**
+
+| 名称 | 类型 | 定义 |
+|---|---|---|
+| `pk_model_api` | PK | `(id)` |
+| `fk_model_api_owner_id` | FK | `(owner_id) → app_user(id) ON DELETE CASCADE` |
+| `uq_model_api_owner_id_name` | UNIQUE | `(owner_id, name)` → 冲突返回 `409 CONFLICT` |
+| `ck_model_api_provider` | CHECK | `provider IN ('deepseek','openai','qwen','custom')` |
+| `uq_model_api_owner_default` | 部分 UNIQUE 索引 | `(owner_id) WHERE is_default` → **每用户至多一条默认 API**，DB 层兜底 |
+| `idx_model_api_owner_id` | 普通索引 | `(owner_id)` → 列表按 owner 过滤 |
+
+**设计说明**
+
+- **加密方案（冻结）**：`cryptography.fernet` 对称加密；主密钥来自环境变量 `SECRET_KEY`（任意高熵字符串，经 SHA-256 → urlsafe-b64 派生为 Fernet 密钥），**不落库、不写日志、不进 Trace**。加解密封装在 `app/core/crypto.py`；解密失败映射为契约错误码 `SECRET_DECRYPT_FAILED`。
+- 与 V1 `mcp_server.headers` 明文（D-DB9）的差异是**有意的**：V2 密钥是用户级资产且数量更多，泄露面更大；评分标准也明确要求"密钥加密存储"（修改意见 §3.5 硬性）。Fernet 为单环境变量方案，不引入密钥管理系统，轮换步骤见 §7.7。
+- 删除策略：被 `agent.model_api_id` 引用时 FK `RESTRICT` 拦截物理删除，接口返回 `409 MODEL_API_IN_USE` 并提示置 `enabled=false`。
+
+### 3.9 `model_api_model` —— API 下的可用模型清单（V2 新增）
+
+| 列 | 类型 | NULL | 默认 | 说明 |
+|---|---|:--:|---|---|
+| `id` | bigint | 否 | identity | 主键 |
+| `model_api_id` | bigint | 否 | — | FK → `model_api.id`，`ON DELETE CASCADE` |
+| `model_key` | varchar(128) | 否 | — | 传给上游的 model 名，如 `deepseek-chat` |
+| `display_name` | varchar(128) | 否 | — | 展示名 |
+| `capabilities` | jsonb | 否 | `'{}'` | `{"tool_call":true,"vision":false,"context_window":64000}`；结构见 §5.4 |
+| `enabled` | boolean | 否 | `true` | — |
+| `is_default` | boolean | 否 | `false` | 该 API 下的默认模型 |
+| `created_at` | timestamptz | 否 | `now()` | 清单无更新语义（改即重建），故无 `updated_at` |
+
+**约束与索引**
+
+| 名称 | 类型 | 定义 |
+|---|---|---|
+| `pk_model_api_model` | PK | `(id)` |
+| `fk_model_api_model_model_api_id` | FK | `(model_api_id) → model_api(id) ON DELETE CASCADE` |
+| `uq_model_api_model_model_api_id_model_key` | UNIQUE | `(model_api_id, model_key)` |
+| `uq_model_api_model_default` | 部分 UNIQUE 索引 | `(model_api_id) WHERE is_default` → **每条 API 至多一个默认模型** |
+
+### 3.10 `skill` —— 可复用能力包（V2 新增）
+
+| 列 | 类型 | NULL | 默认 | 说明 |
+|---|---|:--:|---|---|
+| `id` | bigint | 否 | identity | 主键 |
+| `owner_id` | bigint | 否 | — | FK → `app_user.id`，`ON DELETE CASCADE` |
+| `name` | varchar(64) | 否 | — | 展示名 |
+| `slug` | varchar(80) | 否 | — | 引用标识；发布快照按 `slug + version` 匹配（修改意见 §5.4） |
+| `summary` | varchar(512) | 否 | `''` | 摘要 |
+| `category` | varchar(32) | 否 | `'general'` | `general` \| `writing` \| `coding` \| `data` \| `research` \| `ops` |
+| `icon` | varchar(64) | 是 | NULL | 图标名，前端映射，不做图片上传 |
+| `version` | varchar(16) | 否 | `'1.0.0'` | 语义化版本，由应用层校验格式 |
+| `visibility` | varchar(16) | 否 | `'private'` | `private` \| `public` |
+| `status` | varchar(16) | 否 | `'draft'` | `draft` \| `published` \| `archived` |
+| `instructions` | text | 否 | `''` | 注入 system prompt 的片段，支持 `{{param}}` 占位；仅做字符串替换 |
+| `input_schema` | jsonb | 否 | `'{}'` | 参数契约（JSON Schema 子集），结构见 §5.5 |
+| `tags` | jsonb | 否 | `'[]'` | 字符串数组，广场筛选用 |
+| `install_count` | integer | 否 | `0` | 安装计数，原子 `UPDATE ... SET x = x + 1` |
+| `like_count` | integer | 否 | `0` | 点赞计数 |
+| `created_at` / `updated_at` | timestamptz | 否 | `now()` | — |
+
+**约束与索引**
+
+| 名称 | 类型 | 定义 |
+|---|---|---|
+| `pk_skill` | PK | `(id)` |
+| `fk_skill_owner_id` | FK | `(owner_id) → app_user(id) ON DELETE CASCADE` |
+| `uq_skill_owner_id_slug` | UNIQUE | `(owner_id, slug)` |
+| `ck_skill_visibility` / `ck_skill_status` / `ck_skill_category` | CHECK | 上述枚举值 |
+| `ck_skill_slug_format` | CHECK | `slug ~ '^[a-z0-9][a-z0-9-]*$'`；slug 是跨用户引用标识，格式必须稳定 |
+| `idx_skill_public` | 普通索引 | `(status, visibility, category)` → Skills Center 广场列表 |
+| `idx_skill_owner_id` | 普通索引 | `(owner_id)` → "我的 Skills" 列表 |
+
+**设计说明**
+
+- `install_count` / `like_count` 冗余计数列：广场列表按"最热"排序是高频路径，不应每次聚合 `publication_install` / 点赞表。
+- `keyword` 搜索（`name` / `summary`）走 `ILIKE` 顺序扫描：百级数据量无需全文索引（同 D-DB8 原则）。
+
+### 3.11 `skill_tool` —— Skill 与 Tool 绑定（V2 新增）
+
+| 列 | 类型 | NULL | 默认 | 说明 |
+|---|---|:--:|---|---|
+| `skill_id` | bigint | 否 | — | FK → `skill.id`，`ON DELETE CASCADE`（联合主键） |
+| `tool_id` | bigint | 否 | — | FK → `mcp_tool.id`，`ON DELETE CASCADE`（联合主键） |
+| `required` | boolean | 否 | `true` | `false` 时工具缺失仅记录 Trace `skill_tool_missing`；`true` 时缺失直接拒绝运行（修改意见 §4.4） |
+
+**索引**：`idx_skill_tool_tool_id (tool_id)` —— 反查"哪些 Skill 依赖该 Tool"（禁用/删除 Tool 时的影响面评估）。
+
+### 3.12 `agent_skill` —— Agent 与 Skill 挂载（V2 新增）
+
+| 列 | 类型 | NULL | 默认 | 说明 |
+|---|---|:--:|---|---|
+| `agent_id` | bigint | 否 | — | FK → `agent.id`，`ON DELETE CASCADE`（联合主键） |
+| `skill_id` | bigint | 否 | — | FK → `skill.id`，**`ON DELETE RESTRICT`**（联合主键）：被挂载的 Skill 禁止物理删除，返回 `409 SKILL_IN_USE` |
+| `order_no` | smallint | 否 | `0` | 注入顺序，按升序渲染进 system prompt |
+| `enabled` | boolean | 否 | `true` | 临时停用某 Skill 而不解除挂载 |
+| `params` | jsonb | 否 | `'{}'` | 覆盖 Skill 默认参数的值，结构见 §5.5 |
+
+**索引**：`idx_agent_skill_skill_id (skill_id)` —— 删除 Skill 前的引用计数查询（409 提示"被 N 个 Agent 挂载"）。
+
+### 3.13 `agent_publication` —— Agent 发布快照（V2 新增）
+
+| 列 | 类型 | NULL | 默认 | 说明 |
+|---|---|:--:|---|---|
+| `id` | bigint | 否 | identity | 主键 |
+| `owner_id` | bigint | 否 | — | FK → `app_user.id`，`ON DELETE CASCADE`；作者 |
+| `source_agent_id` | bigint | 是 | NULL | FK → `agent.id`，**`ON DELETE SET NULL`**；源 Agent 删除后发布保留 |
+| `title` | varchar(64) | 否 | — | 广场卡片标题 |
+| `summary` | varchar(512) | 否 | `''` | 简介 |
+| `category` | varchar(32) | 否 | `'general'` | 同 `skill.category` 枚举 |
+| `version` | varchar(16) | 否 | `'1.0.0'` | 发布版本 |
+| `status` | varchar(16) | 否 | `'published'` | `draft` \| `published` \| `offline` |
+| `snapshot` | jsonb | 否 | — | **脱敏后的不可变快照**，结构冻结于修改意见 §5.4，白名单校验见 §5.6 |
+| `install_count` / `like_count` | integer | 否 | `0` | 冗余计数，原子自增 |
+| `published_at` | timestamptz | 是 | NULL | 发布时间；草稿为 NULL |
+| `created_at` / `updated_at` | timestamptz | 否 | `now()` | — |
+
+**约束与索引**
+
+| 名称 | 类型 | 定义 |
+|---|---|---|
+| `pk_agent_publication` | PK | `(id)` |
+| `uq_agent_publication_owner_id_source_agent_id_version` | UNIQUE | `(owner_id, source_agent_id, version)` → 同一 Agent 同一版本只允许一条发布；重发需升版本（修改意见 Q4） |
+| `ck_agent_publication_status` / `ck_agent_publication_category` | CHECK | 上述枚举值 |
+| `idx_publication_feed` | 普通索引 | `(status, category, published_at DESC)` → 广场列表（最新/分类筛选） |
+| `idx_agent_publication_owner_id` | 普通索引 | `(owner_id)` → "我的发布" 列表 |
+
+**设计说明**
+
+- **`snapshot` 是不可变资产**：发布后不允许 UPDATE 该列（应用层约束）；Skill 后续变更不影响已发布快照（修改意见 §4.4 约束 4、Q4）。
+- **"最热"排序**：V2 直接按 `install_count + like_count` 应用层排序字段查询，百级数据量无需表达式索引。
+- `snapshot` 不建 GIN 索引（同 §3.6 原则，无按内容检索需求）。
+
+### 3.14 `publication_like` —— 点赞关系（V2 新增）
+
+| 列 | 类型 | NULL | 说明 |
+|---|---|:--:|---|
+| `publication_id` | bigint | 否 | FK → `agent_publication.id`，`ON DELETE CASCADE`（联合主键） |
+| `user_id` | bigint | 否 | FK → `app_user.id`，`ON DELETE CASCADE`（联合主键） |
+| `created_at` | timestamptz | 否 | 点赞时间 |
+
+主键天然保证"同一用户只能点一次"（US-M3-6）；重复点赞由应用层捕获唯一冲突后按幂等成功或 409 处理（契约口径）。`like_count` 与插入/删除同事务原子更新。
+
+**索引**：`idx_publication_like_user_id (user_id)` —— "我赞过哪些" 查询。
+
+### 3.15 `publication_install` —— 安装记录（V2 新增）
+
+| 列 | 类型 | NULL | 说明 |
+|---|---|:--:|---|
+| `id` | bigint | 否 | identity 主键 |
+| `publication_id` | bigint | 否 | FK → `agent_publication.id`，`ON DELETE CASCADE` |
+| `installer_id` | bigint | 否 | FK → `app_user.id`，`ON DELETE CASCADE` |
+| `installed_agent_id` | bigint | 是 | FK → `agent.id`，**`ON DELETE SET NULL`**；本地副本删除后安装记录保留 |
+| `created_at` | timestamptz | 否 | 安装时间 |
+
+**约束与索引**
+
+| 名称 | 类型 | 定义 |
+|---|---|---|
+| `pk_publication_install` | PK | `(id)` |
+| `uq_publication_install_publication_id_installer_id` | UNIQUE | `(publication_id, installer_id)` → **重复安装返回 `409 ALREADY_INSTALLED`**，DB 层兜底防重复计数（US-M3-4） |
+| `idx_publication_install_installer_id` | 普通索引 | `(installer_id)` → "我安装过哪些" 查询 |
+
+**设计说明**
+
+- 唯一约束意味着"卸载后重装"在 V2 不存在：删除本地副本（`installed_agent_id` 置 NULL）后再次安装仍命中冲突，接口返回 409 并携带原记录——副本已删除时提示用户"曾安装过"，由前端引导重新查看详情。该取舍换取计数永远准确、安装接口天然幂等。
 
 ---
 
@@ -469,6 +723,83 @@ erDiagram
 | **应用日志禁止打印 `headers` / API Key 原值**，出参统一 `***` | 全局日志配置 / Service |
 
 > 最后一行是 §5.3 中唯一不在 `TraceMapper` 内的规则：它约束的是**日志输出**而非落库。`logger.info(f"register server {payload}")` 这类写法会把 Key 写进日志文件，必须由 Service 层显式脱敏后再打印（见 §7.6）。
+
+### 5.4 `model_api_model.capabilities`（V2）
+
+模型能力声明，运行期据此做 tool_call 校验（修改意见 §3.4、WP-B 协同）：
+
+```json
+{ "tool_call": true, "vision": false, "context_window": 64000 }
+```
+
+约定：
+
+- 全部键可选，缺省按 `{"tool_call": true}` 处理（与 V1 行为一致：所有模型默认可工具调用）；
+- `context_window` 供 Skill Resolver 计算 60% Prompt 预算（修改意见 §4.4）；缺失时用默认预算；
+- 由应用层白名单读取（`tool_call` / `vision` / `context_window`），未知键忽略，不写库校验。
+
+### 5.5 `skill.input_schema` 与 `agent_skill.params`（V2）
+
+`skill.input_schema` 为参数契约（JSON Schema 子集），运行期形态对应 `SkillParameter`：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "tone": { "type": "string", "description": "语气", "default": "正式" },
+    "max_items": { "type": "number", "default": 5 }
+  },
+  "required": ["tone"]
+}
+```
+
+`agent_skill.params` 为挂载时的覆盖值，平铺键值：
+
+```json
+{ "tone": "幽默" }
+```
+
+约定：
+
+- 渲染**仅做 `{{param}}` 字符串替换，不做表达式求值**（修改意见 §4.4），DB 层不校验参数合法性，由运行期 `SkillResolver` 校验必填并抛 `SKILL_INVALID_PARAMS`；
+- 参数值类型限定 `string | number | boolean`（`SkillParameter` 的运行时形态），嵌套对象不支持；
+- 与 §5.3 相同：参数值中禁止出现密钥形态字符串，挂载接口需过脱敏扫描。
+
+### 5.6 `agent_publication.snapshot`（V2）
+
+发布快照为**白名单结构**（修改意见 §5.4 冻结），任何白名单外字段视为泄露，发布前由 `app/agent/snapshot.py` 的 `parse_agent_snapshot` 强制校验：
+
+```json
+{
+  "schema_version": 1,
+  "agent": {
+    "name": "周报助手",
+    "description": "...",
+    "system_prompt": "...",
+    "max_steps": 8,
+    "required_capabilities": ["tool_call"]
+  },
+  "suggested_model": { "provider": "deepseek", "model_key": "deepseek-chat" },
+  "skills": [
+    { "slug": "weekly-report", "version": "1.0.0", "params": { "tone": "正式" } }
+  ],
+  "tools": [
+    {
+      "server_name": "git-tools",
+      "remote_name": "list_commits",
+      "transport": "streamable_http",
+      "endpoint": "https://example.com/mcp",
+      "required": true
+    }
+  ]
+}
+```
+
+**禁止出现**（DB 层不落库约束，由应用层在发布事务内校验，接口层出参二次过滤）：
+
+`api_key` / `api_key_cipher` / `api_key_hint` / `apikey` / `authorization` / `headers` / `mcp_headers` / `owner_id` / `model_api_id` / `password` / `password_hash` / `secret` / `token`（大小写不敏感，递归扫描）。
+
+`endpoint` 允许写入（用于依赖提示），但安装时**不自动注册**同名 MCP Server（修改意见 §5.4）。
 
 ---
 
@@ -641,6 +972,235 @@ COMMENT ON COLUMN agent_step.step_no
     IS '图执行步序号；0 为 Run 级事件；同一 step_no 可有多条事件，不做唯一约束';
 ```
 
+### 6.1 V2 增量 DDL（新增于 v2.0）
+
+> 与 Alembic 迁移 `0002_v2_schema` 一一对应；含 9 张新表、`agent` 表变更与 `agent_step` CHECK 扩充。回填语句见 §7.7。
+
+```sql
+-- =============================================================
+-- AgentHub V2.0 — Incremental Schema (PostgreSQL 16)
+-- =============================================================
+
+-- ---------- app_user ----------
+CREATE TABLE app_user (
+    id            bigint      GENERATED BY DEFAULT AS IDENTITY,
+    email         varchar(128) NOT NULL,
+    display_name  varchar(64)  NOT NULL,
+    password_hash varchar(255) NOT NULL,
+    status        varchar(16)  NOT NULL DEFAULT 'active',
+    created_at    timestamptz  NOT NULL DEFAULT now(),
+    updated_at    timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT pk_app_user PRIMARY KEY (id),
+    CONSTRAINT uq_app_user_email UNIQUE (email),
+    CONSTRAINT ck_app_user_status CHECK (status IN ('active', 'disabled'))
+);
+COMMENT ON TABLE app_user IS '平台账号（V2 最小账号体系）';
+
+-- ---------- model_api ----------
+CREATE TABLE model_api (
+    id             bigint       GENERATED BY DEFAULT AS IDENTITY,
+    owner_id       bigint       NOT NULL,
+    name           varchar(64)  NOT NULL,
+    provider       varchar(32)  NOT NULL,
+    base_url       varchar(512) NOT NULL,
+    api_key_cipher text         NOT NULL,
+    api_key_hint   varchar(16),
+    is_default     boolean      NOT NULL DEFAULT false,
+    enabled        boolean      NOT NULL DEFAULT true,
+    last_test_at   timestamptz,
+    last_test_ok   boolean,
+    last_error     varchar(512),
+    created_at     timestamptz  NOT NULL DEFAULT now(),
+    updated_at     timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT pk_model_api PRIMARY KEY (id),
+    CONSTRAINT fk_model_api_owner_id
+        FOREIGN KEY (owner_id) REFERENCES app_user (id) ON DELETE CASCADE,
+    CONSTRAINT uq_model_api_owner_id_name UNIQUE (owner_id, name),
+    CONSTRAINT ck_model_api_provider
+        CHECK (provider IN ('deepseek', 'openai', 'qwen', 'custom'))
+);
+CREATE INDEX idx_model_api_owner_id ON model_api (owner_id);
+-- 每用户至多一条默认 Model API（部分唯一索引，DB 层兜底）
+CREATE UNIQUE INDEX uq_model_api_owner_default
+    ON model_api (owner_id) WHERE is_default;
+COMMENT ON TABLE model_api IS '用户级模型接入配置（V2）';
+COMMENT ON COLUMN model_api.api_key_cipher IS 'Fernet 密文，禁止明文入库、禁止回显';
+
+-- ---------- model_api_model ----------
+CREATE TABLE model_api_model (
+    id            bigint       GENERATED BY DEFAULT AS IDENTITY,
+    model_api_id  bigint       NOT NULL,
+    model_key     varchar(128) NOT NULL,
+    display_name  varchar(128) NOT NULL,
+    capabilities  jsonb        NOT NULL DEFAULT '{}'::jsonb,
+    enabled       boolean      NOT NULL DEFAULT true,
+    is_default    boolean      NOT NULL DEFAULT false,
+    created_at    timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT pk_model_api_model PRIMARY KEY (id),
+    CONSTRAINT fk_model_api_model_model_api_id
+        FOREIGN KEY (model_api_id) REFERENCES model_api (id) ON DELETE CASCADE,
+    CONSTRAINT uq_model_api_model_model_api_id_model_key
+        UNIQUE (model_api_id, model_key)
+);
+CREATE UNIQUE INDEX uq_model_api_model_default
+    ON model_api_model (model_api_id) WHERE is_default;
+COMMENT ON TABLE model_api_model IS 'Model API 下的可用模型清单（V2）';
+
+-- ---------- skill ----------
+CREATE TABLE skill (
+    id            bigint       GENERATED BY DEFAULT AS IDENTITY,
+    owner_id      bigint       NOT NULL,
+    name          varchar(64)  NOT NULL,
+    slug          varchar(80)  NOT NULL,
+    summary       varchar(512) NOT NULL DEFAULT '',
+    category      varchar(32)  NOT NULL DEFAULT 'general',
+    icon          varchar(64),
+    version       varchar(16)  NOT NULL DEFAULT '1.0.0',
+    visibility    varchar(16)  NOT NULL DEFAULT 'private',
+    status        varchar(16)  NOT NULL DEFAULT 'draft',
+    instructions  text         NOT NULL DEFAULT '',
+    input_schema  jsonb        NOT NULL DEFAULT '{}'::jsonb,
+    tags          jsonb        NOT NULL DEFAULT '[]'::jsonb,
+    install_count integer      NOT NULL DEFAULT 0,
+    like_count    integer      NOT NULL DEFAULT 0,
+    created_at    timestamptz  NOT NULL DEFAULT now(),
+    updated_at    timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT pk_skill PRIMARY KEY (id),
+    CONSTRAINT fk_skill_owner_id
+        FOREIGN KEY (owner_id) REFERENCES app_user (id) ON DELETE CASCADE,
+    CONSTRAINT uq_skill_owner_id_slug UNIQUE (owner_id, slug),
+    CONSTRAINT ck_skill_visibility CHECK (visibility IN ('private', 'public')),
+    CONSTRAINT ck_skill_status
+        CHECK (status IN ('draft', 'published', 'archived')),
+    CONSTRAINT ck_skill_category
+        CHECK (category IN ('general', 'writing', 'coding', 'data', 'research', 'ops')),
+    CONSTRAINT ck_skill_slug_format CHECK (slug ~ '^[a-z0-9][a-z0-9-]*$')
+);
+CREATE INDEX idx_skill_public ON skill (status, visibility, category);
+CREATE INDEX idx_skill_owner_id ON skill (owner_id);
+COMMENT ON TABLE skill IS '可复用能力包：指令片段 + 工具集合 + 参数契约（V2）';
+
+-- ---------- skill_tool ----------
+CREATE TABLE skill_tool (
+    skill_id bigint  NOT NULL,
+    tool_id  bigint  NOT NULL,
+    required boolean NOT NULL DEFAULT true,
+    CONSTRAINT pk_skill_tool PRIMARY KEY (skill_id, tool_id),
+    CONSTRAINT fk_skill_tool_skill_id
+        FOREIGN KEY (skill_id) REFERENCES skill (id) ON DELETE CASCADE,
+    CONSTRAINT fk_skill_tool_tool_id
+        FOREIGN KEY (tool_id) REFERENCES mcp_tool (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_skill_tool_tool_id ON skill_tool (tool_id);
+COMMENT ON TABLE skill_tool IS 'Skill 与 MCP Tool 的绑定关系（V2）';
+
+-- ---------- agent_skill ----------
+CREATE TABLE agent_skill (
+    agent_id bigint   NOT NULL,
+    skill_id bigint   NOT NULL,
+    order_no smallint NOT NULL DEFAULT 0,
+    enabled  boolean  NOT NULL DEFAULT true,
+    params   jsonb    NOT NULL DEFAULT '{}'::jsonb,
+    CONSTRAINT pk_agent_skill PRIMARY KEY (agent_id, skill_id),
+    CONSTRAINT fk_agent_skill_agent_id
+        FOREIGN KEY (agent_id) REFERENCES agent (id) ON DELETE CASCADE,
+    CONSTRAINT fk_agent_skill_skill_id
+        FOREIGN KEY (skill_id) REFERENCES skill (id) ON DELETE RESTRICT
+);
+CREATE INDEX idx_agent_skill_skill_id ON agent_skill (skill_id);
+COMMENT ON TABLE agent_skill IS 'Agent 与 Skill 的挂载关系（V2）';
+
+-- ---------- agent_publication ----------
+CREATE TABLE agent_publication (
+    id              bigint       GENERATED BY DEFAULT AS IDENTITY,
+    owner_id        bigint       NOT NULL,
+    source_agent_id bigint,
+    title           varchar(64)  NOT NULL,
+    summary         varchar(512) NOT NULL DEFAULT '',
+    category        varchar(32)  NOT NULL DEFAULT 'general',
+    version         varchar(16)  NOT NULL DEFAULT '1.0.0',
+    status          varchar(16)  NOT NULL DEFAULT 'published',
+    snapshot        jsonb        NOT NULL,
+    install_count   integer      NOT NULL DEFAULT 0,
+    like_count      integer      NOT NULL DEFAULT 0,
+    published_at    timestamptz,
+    created_at      timestamptz  NOT NULL DEFAULT now(),
+    updated_at      timestamptz  NOT NULL DEFAULT now(),
+    CONSTRAINT pk_agent_publication PRIMARY KEY (id),
+    CONSTRAINT fk_agent_publication_owner_id
+        FOREIGN KEY (owner_id) REFERENCES app_user (id) ON DELETE CASCADE,
+    CONSTRAINT fk_agent_publication_source_agent_id
+        FOREIGN KEY (source_agent_id) REFERENCES agent (id) ON DELETE SET NULL,
+    CONSTRAINT uq_agent_publication_owner_id_source_agent_id_version
+        UNIQUE (owner_id, source_agent_id, version),
+    CONSTRAINT ck_agent_publication_status
+        CHECK (status IN ('draft', 'published', 'offline')),
+    CONSTRAINT ck_agent_publication_category
+        CHECK (category IN ('general', 'writing', 'coding', 'data', 'research', 'ops'))
+);
+CREATE INDEX idx_publication_feed
+    ON agent_publication (status, category, published_at DESC);
+CREATE INDEX idx_agent_publication_owner_id ON agent_publication (owner_id);
+COMMENT ON TABLE agent_publication IS 'Agent 发布快照（V2 Agent Center）';
+COMMENT ON COLUMN agent_publication.snapshot
+    IS '脱敏后的不可变发布快照，禁止包含密钥 / headers / owner_id';
+
+-- ---------- publication_like ----------
+CREATE TABLE publication_like (
+    publication_id bigint      NOT NULL,
+    user_id        bigint      NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pk_publication_like PRIMARY KEY (publication_id, user_id),
+    CONSTRAINT fk_publication_like_publication_id
+        FOREIGN KEY (publication_id) REFERENCES agent_publication (id) ON DELETE CASCADE,
+    CONSTRAINT fk_publication_like_user_id
+        FOREIGN KEY (user_id) REFERENCES app_user (id) ON DELETE CASCADE
+);
+CREATE INDEX idx_publication_like_user_id ON publication_like (user_id);
+COMMENT ON TABLE publication_like IS 'Publication 点赞关系（V2）';
+
+-- ---------- publication_install ----------
+CREATE TABLE publication_install (
+    id                 bigint      GENERATED BY DEFAULT AS IDENTITY,
+    publication_id     bigint      NOT NULL,
+    installer_id       bigint      NOT NULL,
+    installed_agent_id bigint,
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT pk_publication_install PRIMARY KEY (id),
+    CONSTRAINT fk_publication_install_publication_id
+        FOREIGN KEY (publication_id) REFERENCES agent_publication (id) ON DELETE CASCADE,
+    CONSTRAINT fk_publication_install_installer_id
+        FOREIGN KEY (installer_id) REFERENCES app_user (id) ON DELETE CASCADE,
+    CONSTRAINT fk_publication_install_installed_agent_id
+        FOREIGN KEY (installed_agent_id) REFERENCES agent (id) ON DELETE SET NULL,
+    CONSTRAINT uq_publication_install_publication_id_installer_id
+        UNIQUE (publication_id, installer_id)
+);
+CREATE INDEX idx_publication_install_installer_id
+    ON publication_install (installer_id);
+COMMENT ON TABLE publication_install IS 'Publication 安装记录（V2）';
+
+-- ---------- agent 表变更（V2）----------
+ALTER TABLE agent ADD COLUMN owner_id     bigint;
+ALTER TABLE agent ADD COLUMN model_api_id bigint;
+ALTER TABLE agent ADD COLUMN model_key    varchar(128);
+ALTER TABLE agent ADD CONSTRAINT fk_agent_owner_id
+    FOREIGN KEY (owner_id) REFERENCES app_user (id);
+ALTER TABLE agent ADD CONSTRAINT fk_agent_model_api_id
+    FOREIGN KEY (model_api_id) REFERENCES model_api (id) ON DELETE RESTRICT;
+CREATE INDEX idx_agent_owner_created_active
+    ON agent (owner_id, created_at DESC) WHERE deleted_at IS NULL;
+
+-- ---------- agent_step.event_type CHECK 扩充（V2）----------
+ALTER TABLE agent_step DROP CONSTRAINT ck_agent_step_event_type;
+ALTER TABLE agent_step ADD CONSTRAINT ck_agent_step_event_type CHECK (event_type IN (
+    'RUN_STARTED', 'LLM_STARTED', 'LLM_FINISHED', 'TOOL_CANDIDATES',
+    'SKILL_INJECTED', 'SKILL_TOOL_MISSING',
+    'TOOL_CALL_STARTED', 'TOOL_CALL_FINISHED', 'STATE_UPDATED',
+    'RUN_FINISHED', 'RUN_FAILED'
+));
+```
+
 ---
 
 ## 7. 迁移与数据访问约定
@@ -658,12 +1218,16 @@ COMMENT ON COLUMN agent_step.step_no
 | downgrade | 初始迁移与后续迁移都必须实现 `downgrade()`，至少保证可回退一步 |
 | 禁止 | 手工在数据库执行 DDL 后不写迁移；`alembic stamp` 跳过未执行的迁移 |
 
-### 7.2 预期迁移序列（V1）
+### 7.2 预期迁移序列
 
 | 版本 | 内容 |
 |---|---|
-| `0001_initial_schema` | 本文档 §6 全部 6 张表与索引 |
-| `0002_seed_none` | 预留（V1 无种子数据） |
+| `0001_initial_schema` | 本文档 §6 全部 V1 6 张表与索引 |
+| `0002_v2_schema` | V2 增量：9 张新表 + `agent` 变更（owner_id / model_api_id / model_key + 新索引）+ `agent_step` CHECK 扩充（SKILL_INJECTED / SKILL_TOOL_MISSING）+ **V1 数据回填**（§7.7）；已实现可 downgrade |
+| `0003_add_trgm_if_needed` | 条件性：若关键词搜索实测变慢再加 `pg_trgm`（对应 §9 D-DB8） |
+| `0004_agent_model_deprecate` | V3 评估：下线 `agent.model` 双写列（V2 保留一个版本） |
+
+**约束**：任何后续需求不得直接改库；先改 Alembic 迁移，再改代码。`0002` 的 downgrade 会删除全部 V2 表与 `agent` 新列（列数据随列消失），已在真实库上完成 upgrade → downgrade → upgrade 往返验证。
 
 ### 7.3 连接与超时
 
@@ -725,6 +1289,49 @@ create_async_engine(
 | 落库 | **不落库**，仅标准输出，由容器日志采集 |
 | 不记录 | 读接口（`GET` / SSE）不记，避免日志淹没 |
 
+### 7.7 V1 → V2 迁移与回填（迁移 `0002_v2_schema`，对应修改意见 §3.2 / CHG-10）
+
+**执行前准备（修改意见 R8）**
+
+```bash
+# 迁移前必须备份；回填失败时整体回滚后可用备份恢复
+pg_dump -Fc -h localhost -U postgres -d agenthub > backups/agenthub_pre_v2_$(date +%Y%m%d_%H%M%S).dump
+# 恢复：pg_restore -c -d agenthub backups/<file>.dump
+```
+
+**回填规则（与迁移代码逐一对应，幂等）**
+
+1. **内置 local 用户**：`INSERT ... ON CONFLICT (email) DO NOTHING` 创建
+   `local@agenthub.local`（`display_name='Local'`，`password_hash='!locked'` 不可登录占位）；
+   local 模式（未登录演示）下所有资源归属该用户。
+2. **`agent.owner_id` 回填**：全部历史 Agent 统一置为 local 用户。
+3. **`model_api` / `model_key` 回填**：按 V1 `model` 字符串以第一个 `/` 拆分为
+   `provider + model_key`（非标准 provider 归 `custom`），为每个 provider 建一条名为
+   `迁移导入-{provider}` 的"系统迁移"Model API：
+   - `base_url` 取 `LLM_BASE_URL` 环境变量，缺省按 provider 官方地址；
+   - `api_key` 取 `LLM_API_KEY`（或 provider 专用的 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` /
+     `DASHSCOPE_API_KEY`），**以 Fernet 加密后写入 `api_key_cipher`**（仅迁移窗口内使用一次）；
+   - 同步写入 `model_api_model` 清单（每 API 首个模型置 `is_default=true`，
+     `capabilities={"tool_call": true}` 与 V1 行为对齐），并回填
+     `agent.model_api_id` / `agent.model_key`。
+4. **降级策略**：缺少 `SECRET_KEY` 或 API Key 时**跳过 Model API 回填且不报错**——
+   历史 Agent 保持 `model_api_id=NULL` 走 legacy 环境变量路径（契约 E4），
+   迁移本身始终可完成；`custom` 且无 `LLM_BASE_URL` 时同理跳过。
+5. **脏数据保护**：`model` 无 `/` 的历史行跳过，不阻断迁移。
+6. 离线模式（`alembic upgrade --sql`）只生成 DDL，自动跳过数据回填。
+
+**密钥轮换（SECRET_KEY 变更）**
+
+DB 不感知密钥内容；轮换需一次性重加密：
+
+1. 以旧 `SECRET_KEY` 解密全部 `model_api.api_key_cipher`；
+2. 以新 `SECRET_KEY` 重新加密写回（单事务）；
+3. 轮换期间运行中的 Run 会因解密失败报 `SECRET_DECRYPT_FAILED`，需在维护窗口执行。
+
+Fernet 派生算法（SHA-256 → urlsafe-b64）在 `app/core/crypto.py` 与迁移 `0002_v2_schema`
+内各有一份**故意重复**的实现：迁移不 import 应用代码，保证代码演进后迁移仍可重放。
+两者必须保持算法一致，变更任一处需同步另一处并提供重加密迁移。
+
 ---
 
 ## 8. 数据生命周期（对应契约 D3）
@@ -747,6 +1354,11 @@ DELETE FROM agent_run WHERE created_at < now() - interval '30 days';
 | 删除 MCP Server | `mcp_tool` 级联删除 → `agent_tool` 级联删除；绑定关系静默丢失（V1 可接受，前端刷新后可见） |
 | 删除 Run | `agent_step` 级联删除 |
 | Tool 从 Server 消失 | 仅置 `enabled=false`，绑定关系保留 |
+| **删除 Agent（V2）** | `agent_skill` 级联删除；`agent_publication.source_agent_id` / `publication_install.installed_agent_id` 置 NULL；Run / Step 保留 |
+| **删除 Skill（V2）** | 被挂载时 FK `RESTRICT` 拦截（409 `SKILL_IN_USE`）；未挂载时 `skill_tool` 级联删除 |
+| **删除 Model API（V2）** | 被 Agent 引用时 FK `RESTRICT` 拦截（409 `MODEL_API_IN_USE`）；否则 `model_api_model` 级联删除 |
+| **删除 Publication（V2）** | `publication_like` / `publication_install` 级联删除 |
+| **删除用户（V2，不提供接口）** | `model_api` / `skill` / `agent_publication` / 点赞 / 安装记录级联删除；`agent.owner_id` FK 拦截——用户只能禁用（`status='disabled'`） |
 
 ---
 
@@ -791,12 +1403,29 @@ DELETE FROM agent_run WHERE created_at < now() - interval '30 days';
 - 时间维度已由 `created_at` / `updated_at` 覆盖。
 - **不预留 `created_by` / `updated_by` 空列**：无身份来源，空列纯属噪声；将来真有登录体系时，加列是向后兼容操作。
 
+> **V2 注**：D-DB10 的前提（无身份）已被 V2 账号体系打破，`agent.owner_id` 等归属列即该决策的自然演进；审计表仍不引入。
+
 ---
 
-## 11. 版本记录
+## 11. V2 新增设计决策（2026-11，DB Design v2.0）
+
+| 编号 | 问题 | 决策 | 理由 |
+|---|---|---|---|
+| D-DB11 | V2 新表枚举值大小写 | **V2 新表统一小写 snake**（`active` / `private` / `published`…），V1 表保持 UPPER_SNAKE | 与 V2 修改意见草案冻结值一致；V1 存量数据不动，避免无意义的数据订正 |
+| D-DB12 | Model API 密钥加密方案 | **Fernet 对称加密**（`cryptography`），主密钥 `SECRET_KEY` 经 SHA-256 → urlsafe-b64 派生 | 修改意见 §3.5 硬性要求"加密存储，不明文"；派生使任意高熵字符串可用，不强制 Fernet 格式密钥；D-DB9 的"例外条款"在 V2 被触发，范围仅限 `model_api`，`mcp_server.headers` 维持明文 |
+| D-DB13 | 默认值兜底（默认 Model API / 默认模型） | **部分唯一索引** `(owner_id) WHERE is_default`、`(model_api_id) WHERE is_default` | 应用层先切换再落库存在并发窗口；DB 层唯一索引是"至多一个默认"的唯一可靠保证，PostgreSQL 部分索引成本几乎为零 |
+| D-DB14 | 重复安装 / 重复点赞的 DB 兜底 | 点赞用**联合主键**天然去重；安装加 `UNIQUE (publication_id, installer_id)`，冲突返回 409 | 计数列（`install_count` / `like_count`）是冗余聚合，没有唯一约束必然在重试/双击下失真；409 口径与契约错误码一一对应 |
+| D-DB15 | 源 Agent / 本地副本删除后的引用 | `agent_publication.source_agent_id`、`publication_install.installed_agent_id` 均 `ON DELETE SET NULL` | 发布快照与安装记录是社区资产，生命周期独立于源对象（修改意见 Q4：Skill 变更不影响已发布快照） |
+| D-DB16 | Skill 删除保护 | `agent_skill.skill_id` 为 `ON DELETE RESTRICT`；`skill_tool` 两侧均 `CASCADE` | 被挂载的 Skill 删除必须显式失败（409 `SKILL_IN_USE`）而非静默解除挂载；Skill 删除时其工具绑定作为从属数据随主表消失 |
+| D-DB17 | 回填失败的容忍度 | 缺 `SECRET_KEY` / API Key 时**跳过 Model API 回填且不报错**，历史 Agent 保持 legacy | 迁移必须"一键 upgrade"在任何环境可完成（含 CI 与演示机）；legacy 路径本身就是契约支持的运行形态（E4） |
+
+---
+
+## 12. 版本记录
 
 | 版本 | 日期 | 变更 | 对齐 |
 |---|---|---|---|
 | DB Design v1.0 | 2026-09-10 | 首次成文：6 张表字段/约束/索引、完整 DDL、JSONB 结构、`step_no` 语义冻结、迁移与事务约定、8 项设计决策 | Contract v1.1 |
 | DB Design v1.1 | 2026-09-10 | 确认原 §10 两项待确认项（D-DB9 `headers` 明文存储、D-DB10 不做审计改用结构化日志）；§5.3 补充"日志禁止打印 `headers`"规则；新增 §7.6 变更操作日志约定 | Contract v1.2 |
 | DB Design v1.2 | 2026-09-10 | 同步契约 v1.3：`agent_run.stop_reason` 的 CHECK 与 DDL 新增 `INTERNAL_ERROR`（§3.5、§6） | Contract v1.3 |
+| DB Design v2.0 | 2026-11-10 | V2 修改意见落地：新增 §3.7~3.15（`app_user` / `model_api` / `model_api_model` / `skill` / `skill_tool` / `agent_skill` / `agent_publication` / `publication_like` / `publication_install`）；`agent` 表新增 `owner_id` / `model_api_id` / `model_key` 与 owner 索引（§3.1）；`agent_step.event_type` CHECK 扩充 SKILL_* 事件（§3.6）；新增 §5.4~5.6（capabilities / Skill 参数契约 / snapshot 白名单）；§6.1 V2 增量 DDL；§7.7 V1→V2 回填与密钥轮换；§11 新增决策 D-DB11~D-DB17 | V2 修改意见文档（§3.2 / §4.3 / §5.3）|
