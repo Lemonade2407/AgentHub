@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.core.enums import McpServerStatus, TransportType
+from app.core.enums import McpServerStatus, RiskLevel, TransportType
 
 
 class McpServerCreate(BaseModel):
@@ -42,6 +42,12 @@ class McpServerRead(BaseModel):
 
 class ToolTestRequest(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class McpToolRiskUpdate(BaseModel):
+    """人工覆盖工具风险等级（FR-MCP-07）。"""
+
+    risk_level: RiskLevel
 
 
 class ToolTestResult(BaseModel):

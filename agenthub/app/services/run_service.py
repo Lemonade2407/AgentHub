@@ -8,8 +8,10 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agent.model_gateway import ModelCredential, ModelGateway
 from app.agent.model_provider import ModelConfigError, build_chat_model
 from app.agent.runner import AgentRunner, RunResult
+from app.agent.skills import SkillDefinition, SkillValidationError
 from app.core.enums import RunStatus, StepStatus, StopReason, TraceEventType
 from app.core.errors import AppError
 from app.mcp.client_adapter import HttpMcpClientFactory
@@ -17,8 +19,10 @@ from app.mcp.router import ToolRouter
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.mcp_repository import DbMcpServerProvider, McpToolRepository
 from app.repositories.run_repository import RunRepository
+from app.repositories.skill_repository import SkillRepository
 from app.schemas.agent import AgentRead
 from app.schemas.run import RunCreateRequest, RunRead
+from app.services.model_credential_service import ModelCredentialResolver
 from app.services.trace_service import SSEBroker, TraceService
 from app.tools.selector import TfidfToolSelector
 from app.trace.events import TraceEvent
@@ -40,6 +44,7 @@ class RunService:
         self._session_factory = session_factory
         self._broker = broker
         self._client_factory = client_factory
+        self._model_gateway = ModelGateway()
         self._tasks: set[asyncio.Task] = set()
 
     async def create_run(
@@ -52,11 +57,16 @@ class RunService:
         if not agent.enabled:
             raise AppError("AGENT_DISABLED", f"Agent 已禁用：{agent_id}", http_status=409)
 
+        # V2：按 Agent 引用的 Model API 解密凭据；无 V2 字段时返回 None，回落 V1。
+        model_credential = await ModelCredentialResolver(session).resolve(agent_id)
+
         tools = await McpToolRepository(session).list_bound_tools(agent_id=agent_id)
-        if not tools:
+        skills = await self._resolve_skills(session, agent_id)
+        skill_tools = [ref.tool for skill in skills for ref in skill.tools if ref.tool is not None]
+        if not tools and not skill_tools:
             raise AppError(
                 "NO_EXECUTABLE_TOOL",
-                "Agent 至少需要绑定 1 个可用 Tool",
+                "Agent 至少需要绑定 1 个可用 Tool（可由 Skill 提供）",
                 http_status=422,
             )
 
@@ -80,11 +90,28 @@ class RunService:
                 agent=agent,
                 user_input=request.input,
                 max_steps=max_steps,
+                skills=skills,
+                model_credential=model_credential,
             )
         )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return run
+
+    @staticmethod
+    async def _resolve_skills(
+        session: AsyncSession, agent_id: int
+    ) -> list[SkillDefinition]:
+        """Run 前解析 Agent 挂载的 Skill；参数契约不满足时转为可读的业务错误。"""
+        try:
+            return await SkillRepository(session).resolve_for_agent(agent_id=agent_id)
+        except SkillValidationError as exc:
+            raise AppError(
+                exc.code,
+                exc.message,
+                http_status=400,
+                detail={"skill_slug": exc.skill_slug, "param": exc.param},
+            ) from exc
 
     async def _execute(
         self,
@@ -94,6 +121,8 @@ class RunService:
         agent: AgentRead,
         user_input: str,
         max_steps: int,
+        skills: list[SkillDefinition],
+        model_credential: ModelCredential | None,
     ) -> None:
         tracer = TraceService(self._session_factory, self._broker)
 
@@ -107,6 +136,7 @@ class RunService:
                 gateway=gateway,
                 tool_selector=TfidfToolSelector(),
                 model_factory=build_chat_model,
+                model_gateway=self._model_gateway,
                 top_k=DEFAULT_TOP_K,
             )
             try:
@@ -117,6 +147,8 @@ class RunService:
                     user_input=user_input,
                     max_steps=max_steps,
                     tracer=tracer,
+                    skills=skills,
+                    model_credential=model_credential,
                 )
             except ModelConfigError as exc:
                 result = await self._fail_run(

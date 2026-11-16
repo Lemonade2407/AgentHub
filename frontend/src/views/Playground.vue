@@ -53,13 +53,15 @@ function failMessage(resp: Response): Promise<string> {
     .then((b) => b?.message ?? `HTTP ${resp.status}`)
 }
 
-// 契约 §5.1：后端在 `event:` 字段发送 9 类小写事件名，必须按名监听；
+// 契约 §5.1：后端在 `event:` 字段发送小写事件名，必须按名监听；
 // `onmessage` 只接收无 `event:` 字段的帧。
 const SSE_EVENT_NAMES = [
   'run_started',
   'llm_started',
   'llm_finished',
   'tool_candidates',
+  'skill_injected',
+  'skill_tool_missing',
   'tool_call_started',
   'tool_call_finished',
   'state_updated',

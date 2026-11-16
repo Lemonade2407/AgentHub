@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import agents, mcp, runs
+from app.api import agent_center, agents, mcp, runs, skills
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.middleware import install_request_id_middleware
@@ -60,6 +60,9 @@ register_exception_handlers(app)
 app.include_router(agents.router)
 app.include_router(mcp.router)
 app.include_router(runs.router)
+app.include_router(skills.router)
+app.include_router(skills.agent_router)
+app.include_router(agent_center.router)
 
 
 @app.get("/api/health", tags=["health"])

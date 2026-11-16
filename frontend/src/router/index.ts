@@ -17,6 +17,16 @@ const router = createRouter({
       component: () => import('../views/McpCenter.vue'),
     },
     {
+      path: '/skills',
+      name: 'skills-center',
+      component: () => import('../views/SkillsCenter.vue'),
+    },
+    {
+      path: '/skills/:id',
+      name: 'skill-editor',
+      component: () => import('../views/SkillEditor.vue'),
+    },
+    {
       path: '/playground',
       name: 'playground',
       component: () => import('../views/Playground.vue'),

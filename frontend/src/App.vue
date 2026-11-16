@@ -2,6 +2,7 @@
 const navItems = [
   { path: '/agents', label: 'Agent 列表' },
   { path: '/agents/1', label: 'Agent 编辑器' },
+  { path: '/skills', label: 'Skills Center' },
   { path: '/mcp', label: 'MCP Center' },
   { path: '/playground', label: 'Playground' },
 ]

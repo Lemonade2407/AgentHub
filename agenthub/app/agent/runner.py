@@ -392,8 +392,12 @@ class AgentRunner:
         """返回（候选工具, 对应得分, 策略标识）。
 
         策略标识用于 TOOL_CANDIDATES 事件；未启用筛选时得分为空数组。
+        降级规则（FR-SEL-04）：未配置选择器、查询为空、或可用工具数 ≤ K 时
+        注入全部可用工具，`strategy="none"`，避免无意义的排序改变候选集。
         """
         if self._selector is None:
+            return tools, [], "none"
+        if not query.strip() or len(tools) <= self._top_k:
             return tools, [], "none"
         candidates = await self._selector.select(query, tools, top_k=self._top_k)
         return (

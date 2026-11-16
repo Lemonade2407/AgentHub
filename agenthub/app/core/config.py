@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # 是否允许注册/localhost 与私网地址的 MCP Server（本地联调 Demo 时置 true）
     allow_private_mcp: bool = False
 
+    # V2 鉴权模式：local = 使用内置 local 用户（未登录可跑 V1 演示）；
+    # 其余值表示必须登录（账号体系落地后启用）。对应修改意见 Q1。
+    auth_mode: str = "local"
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -82,6 +82,8 @@ const busyServer = ref<number | null>(null)
 // tool 测试结果 { toolId: 结果文本 }
 const toolResults = ref<Record<number, string>>({})
 const busyTool = ref<number | null>(null)
+// FR-MCP-07：风险等级可由人工覆盖（自动推断仍由 Discovery 完成）
+const RISK_LEVELS = ['READ_ONLY', 'LOW_RISK', 'WRITE', 'HIGH_RISK'] as const
 
 function failMessage(resp: Response): Promise<string> {
   return resp
@@ -238,6 +240,30 @@ async function testTool(t: ToolDefinition) {
   }
 }
 
+async function updateRisk(t: ToolDefinition, level: string) {
+  if (level === t.risk_level) return
+  busyTool.value = t.id
+  error.value = ''
+  successMsg.value = ''
+  try {
+    const resp = await fetch(`/api/mcp/tools/${t.id}/risk`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ risk_level: level }),
+    })
+    if (!resp.ok) throw new Error(await failMessage(resp))
+    const updated: ToolDefinition = await resp.json()
+    const index = tools.value.findIndex((item) => item.id === t.id)
+    if (index >= 0) tools.value[index] = updated
+    successMsg.value = `已将 ${t.qualified_name} 的风险等级改为 ${updated.risk_level}`
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+    await loadTools() // 失败时重新拉取，回滚下拉框显示
+  } finally {
+    busyTool.value = null
+  }
+}
+
 function statusClass(status: string): string {
   if (status === 'CONNECTED') return 'on'
   if (status === 'ERROR') return 'error'
@@ -313,7 +339,18 @@ onMounted(() => {
         <tr v-for="t in tools" :key="t.id">
           <td><code>{{ t.qualified_name }}</code></td>
           <td>{{ t.server_name }}</td>
-          <td><span class="risk" :class="t.risk_level.toLowerCase()">{{ t.risk_level }}</span></td>
+          <td class="risk-cell">
+            <span class="risk" :class="t.risk_level.toLowerCase()">{{ t.risk_level }}</span>
+            <select
+              class="risk-select"
+              :value="t.risk_level"
+              :disabled="busyTool === t.id"
+              title="人工覆盖风险等级"
+              @change="updateRisk(t, ($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="level in RISK_LEVELS" :key="level" :value="level">{{ level }}</option>
+            </select>
+          </td>
           <td class="desc">{{ t.description }}</td>
           <td>
             <button class="btn" :disabled="busyTool === t.id" @click="testTool(t)">测试</button>
@@ -434,6 +471,22 @@ onMounted(() => {
 .badge.unknown {
   background: #f0f2f5;
   color: #6e7781;
+}
+
+.risk-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.risk-select {
+  padding: 2px 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 .risk {

@@ -20,6 +20,8 @@ function eventLabel(eventType: string): string {
   const map: Record<string, string> = {
     RUN_STARTED: 'Run 开始',
     TOOL_CANDIDATES: '工具筛选',
+    SKILL_INJECTED: 'Skill 注入',
+    SKILL_TOOL_MISSING: 'Skill 工具缺失',
     LLM_STARTED: 'LLM 调用',
     LLM_FINISHED: 'LLM 完成',
     TOOL_CALL_STARTED: '工具调用',
@@ -29,6 +31,33 @@ function eventLabel(eventType: string): string {
     RUN_FAILED: 'Run 失败',
   }
   return map[eventType] ?? eventType
+}
+
+interface CandidateView {
+  name: string
+  score: number | null
+}
+
+/** FR-SEL-05：把 TOOL_CANDIDATES 的 names / scores 一一对应展示。 */
+function candidateRows(data: Record<string, unknown> | null): CandidateView[] {
+  if (!data) return []
+  const names = Array.isArray(data.names) ? data.names : []
+  const scores = Array.isArray(data.scores) ? data.scores : []
+  return names.map((name, index) => {
+    const score = scores[index]
+    return {
+      name: String(name),
+      score: typeof score === 'number' ? score : null,
+    }
+  })
+}
+
+function text(value: unknown, fallback = ''): string {
+  return value == null ? fallback : String(value)
+}
+
+function names(value: unknown): string {
+  return Array.isArray(value) ? value.map((item) => String(item)).join(', ') : ''
 }
 
 function statusClass(status: string): string {
@@ -76,6 +105,31 @@ function jsonText(data: Record<string, unknown> | null): string {
             <template v-if="fmtDuration(e.duration_ms)">&middot; {{ fmtDuration(e.duration_ms) }}</template>
           </span>
           <span class="time">{{ fmtTs(e.timestamp) }}</span>
+        </div>
+
+        <div v-if="e.event_type === 'TOOL_CANDIDATES' && e.data" class="summary-line">
+          <span class="muted">
+            策略 {{ text(e.data.strategy, 'none') }} · K={{ text(e.data.top_k, '-') }}
+          </span>
+          <span v-for="candidate in candidateRows(e.data)" :key="candidate.name" class="chip">
+            <code>{{ candidate.name }}</code>
+            <em v-if="candidate.score != null">{{ candidate.score.toFixed(2) }}</em>
+          </span>
+        </div>
+
+        <div v-else-if="e.event_type === 'SKILL_INJECTED' && e.data" class="summary-line">
+          <span class="chip on">
+            Skill <code>{{ text(e.data.slug) }}</code> v{{ text(e.data.version) }}
+          </span>
+          <span v-if="names(e.data.tools)" class="muted">贡献工具：{{ names(e.data.tools) }}</span>
+        </div>
+
+        <div v-else-if="e.event_type === 'SKILL_TOOL_MISSING' && e.data" class="summary-line">
+          <span class="chip bad">缺失 <code>{{ text(e.data.tool) }}</code></span>
+          <span class="muted">
+            来自 {{ text(e.data.skill_slug) }} ·
+            {{ e.data.required ? '必填，已拒绝运行' : '可选，已跳过' }}
+          </span>
         </div>
 
         <details v-if="e.data" class="detail">
@@ -168,6 +222,42 @@ function jsonText(data: Record<string, unknown> | null): string {
 .detail {
   margin-top: 8px;
   font-size: 13px;
+}
+
+.summary-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border-color);
+}
+
+.chip em {
+  font-style: normal;
+  color: var(--text-muted);
+}
+
+.chip.on {
+  background: #e6f4ea;
+  border-color: #b7e1c4;
+  color: #1a7f37;
+}
+
+.chip.bad {
+  background: #ffebe9;
+  border-color: #ffcecb;
+  color: #cf222e;
 }
 
 .detail summary {

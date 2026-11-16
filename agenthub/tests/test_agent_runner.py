@@ -328,7 +328,14 @@ async def test_unexpected_exception_becomes_internal_error(caplog) -> None:
 
 async def test_tool_selector_limits_bound_tools_and_reports_scores() -> None:
     """动态 Tool Selection 生效时，只把候选工具注入模型，并上报得分。"""
-    tools = [make_tool(GITHUB_TOOL), make_tool(SEARCH_TOOL), make_tool("db.query")]
+    tools = [
+        make_tool(GITHUB_TOOL),
+        make_tool(SEARCH_TOOL),
+        make_tool("db.query"),
+        make_tool("extra.one"),
+        make_tool("extra.two"),
+        make_tool("extra.three"),
+    ]
     selector = FakeSelector(picks=[GITHUB_TOOL, SEARCH_TOOL], scores={GITHUB_TOOL: 0.81, SEARCH_TOOL: 0.42})
     model = ScriptedChatModel(script=[AIMessage(content="ok")])
     tracer = FakeTracer()
@@ -364,6 +371,48 @@ async def test_without_selector_all_bound_tools_are_exposed() -> None:
     candidates = tracer.of(TraceEventType.TOOL_CANDIDATES)[0]
     assert candidates.data["strategy"] == "none"
     assert candidates.data["scores"] == []
+
+
+async def test_selector_falls_back_when_available_tools_not_more_than_top_k() -> None:
+    """FR-SEL-04：可用工具数 ≤ K 时注入全部，strategy=none，不调用选择器。"""
+    tools = [make_tool(GITHUB_TOOL), make_tool(SEARCH_TOOL)]
+    selector = FakeSelector(picks=[SEARCH_TOOL])
+    model = ScriptedChatModel(script=[AIMessage(content="ok")])
+    tracer = FakeTracer()
+
+    await run_agent(FakeGateway(tools=tools), model, tracer, selector=selector)
+
+    assert selector.queries == []
+    assert [tool["function"]["name"] for tool in model.bound_tools] == [
+        "github__list_issues",
+        "search__search_web",
+    ]
+    candidates = tracer.of(TraceEventType.TOOL_CANDIDATES)[0]
+    assert candidates.data["strategy"] == "none"
+
+
+async def test_selector_falls_back_when_query_is_blank() -> None:
+    """FR-SEL-04：查询为空（含纯空白）时注入全部，strategy=none。"""
+    tools = [
+        make_tool(GITHUB_TOOL),
+        make_tool(SEARCH_TOOL),
+        make_tool("db.query"),
+        make_tool("extra.one"),
+        make_tool("extra.two"),
+        make_tool("extra.three"),
+    ]
+    selector = FakeSelector()
+    model = ScriptedChatModel(script=[AIMessage(content="ok")])
+    tracer = FakeTracer()
+
+    await run_agent(
+        FakeGateway(tools=tools), model, tracer, selector=selector, user_input="   "
+    )
+
+    assert selector.queries == []
+    assert len(model.bound_tools) == len(tools)
+    candidates = tracer.of(TraceEventType.TOOL_CANDIDATES)[0]
+    assert candidates.data["strategy"] == "none"
 
 
 async def test_llm_finished_carries_token_usage_and_finish_reason() -> None:

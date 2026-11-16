@@ -266,6 +266,26 @@ class McpToolRepository:
             is not None
         )
 
+    async def update_risk_level(
+        self, tool_id: int, risk_level: RiskLevel
+    ) -> ToolDefinition:
+        """人工覆盖风险等级（FR-MCP-07）；不存在返回 `TOOL_NOT_FOUND`。"""
+        row = (
+            await self._session.execute(
+                select(McpTool, McpServer.name)
+                .join(McpServer, McpServer.id == McpTool.server_id)
+                .where(McpTool.id == tool_id)
+            )
+        ).first()
+        if row is None:
+            raise AppError("TOOL_NOT_FOUND", f"Tool 不存在：{tool_id}", http_status=404)
+        tool, server_name = row
+        tool.risk_level = risk_level.value
+        tool.updated_at = utcnow()
+        await self._session.flush()
+        await self._session.refresh(tool)
+        return _to_definition(tool, server_name)
+
     async def upsert_tool(self, tool: NormalizedTool) -> ToolUpsertOutcome:
         existing = (
             await self._session.execute(

@@ -17,6 +17,7 @@ from app.schemas.mcp import (
     McpServerCreate,
     McpServerRead,
     McpServerUpdate,
+    McpToolRiskUpdate,
     ToolTestRequest,
     ToolTestResult,
 )
@@ -139,3 +140,15 @@ async def test_tool(
         session, client_factory, allow_private_mcp=settings.allow_private_mcp
     )
     return await service.test_tool(tool_id, payload.arguments)
+
+
+@router.put("/tools/{tool_id}/risk", response_model=ToolDefinition)
+async def update_tool_risk(
+    tool_id: int,
+    payload: McpToolRiskUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> ToolDefinition:
+    """人工覆盖风险等级（FR-MCP-07）；自动推断仍由 Discovery 完成。"""
+    tool = await McpToolRepository(session).update_risk_level(tool_id, payload.risk_level)
+    await session.commit()
+    return tool
