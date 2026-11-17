@@ -68,18 +68,18 @@ function switchTab(next: Tab) {
   statusFilter.value = ''
   error.value = ''
   message.value = ''
-  load()
+  void load()
 }
 
 function search() {
   page.value = 1
-  load()
+  void load()
 }
 
 function goPage(next: number) {
   if (next < 1 || next > totalPages.value) return
   page.value = next
-  load()
+  void load()
 }
 
 async function action(skill: Skill, path: string, method: string, success: string) {
@@ -99,11 +99,11 @@ async function action(skill: Skill, path: string, method: string, success: strin
 }
 
 function publish(skill: Skill) {
-  action(skill, `/api/skills/${skill.id}/publish`, 'POST', `已公开「${skill.name}」`)
+  void action(skill, `/api/skills/${skill.id}/publish`, 'POST', `已公开「${skill.name}」`)
 }
 
 function archive(skill: Skill) {
-  action(skill, `/api/skills/${skill.id}/archive`, 'POST', `已下架「${skill.name}」`)
+  void action(skill, `/api/skills/${skill.id}/archive`, 'POST', `已下架「${skill.name}」`)
 }
 
 async function remove(skill: Skill) {
@@ -150,50 +150,49 @@ onMounted(load)
 
 <template>
   <section class="page">
-    <div class="header">
+    <header class="page-header">
       <div>
-        <h1>Skills Center</h1>
-        <p class="muted">Skill = 指令片段 + 工具绑定 + 参数契约，可复用、可公开、可安装。</p>
+        <h1 class="page-title">Skills Center</h1>
       </div>
       <router-link to="/skills/new" class="btn-primary">新建 Skill</router-link>
-    </div>
+    </header>
 
     <div class="tabs">
-      <button :class="['tab', { active: tab === 'mine' }]" @click="switchTab('mine')">
+      <button class="tab" :class="{ active: tab === 'mine' }" type="button" @click="switchTab('mine')">
         我的 Skills
       </button>
-      <button :class="['tab', { active: tab === 'center' }]" @click="switchTab('center')">
+      <button class="tab" :class="{ active: tab === 'center' }" type="button" @click="switchTab('center')">
         广场
       </button>
     </div>
 
     <div class="toolbar">
-      <input v-model="keyword" type="text" placeholder="按名称 / slug / 简介搜索" @keyup.enter="search" />
-      <select v-model="category">
+      <input v-model="keyword" type="search" placeholder="按名称 / slug / 简介搜索" @keyup.enter="search" />
+      <select v-model="category" @change="search">
         <option value="">全部分类</option>
         <option v-for="item in SKILL_CATEGORIES" :key="item.value" :value="item.value">
           {{ item.label }}
         </option>
       </select>
-      <select v-if="tab === 'mine'" v-model="statusFilter">
+      <select v-if="tab === 'mine'" v-model="statusFilter" @change="search">
         <option value="">全部状态</option>
         <option value="draft">草稿</option>
         <option value="published">已公开</option>
         <option value="archived">已下架</option>
       </select>
-      <select v-else v-model="sort">
+      <select v-else v-model="sort" @change="search">
         <option value="latest">最新</option>
         <option value="popular">最热</option>
       </select>
-      <button class="btn" @click="search">搜索</button>
+      <button class="btn" type="button" @click="search">搜索</button>
     </div>
 
-    <p v-if="error" class="error">{{ error }}</p>
-    <p v-if="message" class="ok">{{ message }}</p>
+    <p v-if="error" class="error-box">{{ error }}</p>
+    <p v-if="message" class="ok notice">{{ message }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
     <div v-if="!loading && skills.length" class="grid">
-      <article v-for="skill in skills" :key="skill.id" class="card">
+      <article v-for="skill in skills" :key="skill.id" class="skill-card">
         <div class="card-head">
           <span class="icon">{{ iconText(skill) }}</span>
           <div class="title">
@@ -219,34 +218,31 @@ onMounted(load)
 
         <div class="actions">
           <template v-if="tab === 'mine' || skill.owned">
-            <router-link :to="`/skills/${skill.id}`" class="btn">编辑</router-link>
+            <router-link :to="`/skills/${skill.id}`" class="btn btn-sm">编辑</router-link>
             <button
               v-if="skill.status !== 'published'"
-              class="btn"
+              class="btn btn-sm"
+              type="button"
               :disabled="busyId === skill.id"
               @click="publish(skill)"
             >
               公开
             </button>
-            <button
-              v-else
-              class="btn"
-              :disabled="busyId === skill.id"
-              @click="archive(skill)"
-            >
+            <button v-else class="btn btn-sm" type="button" :disabled="busyId === skill.id" @click="archive(skill)">
               下架
             </button>
-            <button class="btn danger" :disabled="busyId === skill.id" @click="remove(skill)">
+            <button
+              class="btn btn-sm btn-danger"
+              type="button"
+              :disabled="busyId === skill.id"
+              @click="remove(skill)"
+            >
               删除
             </button>
           </template>
           <template v-else>
-            <router-link :to="`/skills/${skill.id}`" class="btn">查看</router-link>
-            <button
-              class="btn-primary"
-              :disabled="busyId === skill.id"
-              @click="install(skill)"
-            >
+            <router-link :to="`/skills/${skill.id}`" class="btn btn-sm">查看</router-link>
+            <button class="btn-primary btn-sm" type="button" :disabled="busyId === skill.id" @click="install(skill)">
               安装
             </button>
           </template>
@@ -254,98 +250,43 @@ onMounted(load)
       </article>
     </div>
 
-    <p v-else-if="!loading" class="muted empty">
+    <p v-else-if="!loading" class="empty">
       {{
         tab === 'mine'
-          ? '还没有 Skill。点击右上角「新建 Skill」，把常用指令与工具沉淀成能力包。'
+          ? '还没有 Skill，点击右上角「新建 Skill」。'
           : '广场暂无公开 Skill。把 Skill 设为公开后，其他账号即可搜索与安装。'
       }}
     </p>
 
     <div v-if="!loading && total > 0" class="pager">
-      <button class="btn" :disabled="page <= 1" @click="goPage(page - 1)">上一页</button>
+      <button class="btn btn-sm" type="button" :disabled="page <= 1" @click="goPage(page - 1)">上一页</button>
       <span class="muted">第 {{ page }} / {{ totalPages }} 页 · 共 {{ total }} 条</span>
-      <button class="btn" :disabled="page >= totalPages" @click="goPage(page + 1)">下一页</button>
+      <button class="btn btn-sm" type="button" :disabled="page >= totalPages" @click="goPage(page + 1)">
+        下一页
+      </button>
     </div>
   </section>
 </template>
 
 <style scoped>
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 12px;
+.notice {
+  margin-bottom: 10px;
+  font-size: 12.5px;
 }
 
-.header h1 {
-  margin: 0 0 4px;
-}
-
-.header p {
-  margin: 0;
-  font-size: 13px;
-}
-
-.tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--border-color);
-  margin-bottom: 14px;
-}
-
-.tab {
-  padding: 8px 14px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font-size: 14px;
-  color: var(--text-muted);
-  border-bottom: 2px solid transparent;
-}
-
-.tab.active {
-  color: #1a7f37;
-  border-bottom-color: #1a7f37;
-  font-weight: 600;
-}
-
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.toolbar input {
-  padding: 6px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  min-width: 260px;
-}
-
-.toolbar select {
-  padding: 6px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: #fff;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 14px;
-}
-
-.card {
+.skill-card {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: #fff;
+  background: var(--bg-panel);
   border: 1px solid var(--border-color);
-  border-radius: 10px;
+  border-radius: var(--radius-md);
   padding: 16px;
+  transition: border-color 0.15s ease;
+}
+
+.skill-card:hover {
+  border-color: var(--border-strong);
 }
 
 .card-head {
@@ -358,12 +299,12 @@ onMounted(load)
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: var(--surface-muted);
+  background: var(--accent-soft);
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 700;
-  color: #1a7f37;
+  color: var(--accent-hover);
   flex-shrink: 0;
 }
 
@@ -374,24 +315,25 @@ onMounted(load)
 
 .title h3 {
   margin: 0;
-  font-size: 15px;
+  font-size: 14px;
+  font-weight: 600;
   word-break: break-word;
 }
 
 .title .muted {
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .summary {
   margin: 0;
-  font-size: 13px;
-  color: #444;
-  line-height: 1.5;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.6;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  min-height: 39px;
+  min-height: 40px;
 }
 
 .tags {
@@ -400,19 +342,11 @@ onMounted(load)
   gap: 6px;
 }
 
-.tag {
-  padding: 1px 8px;
-  border-radius: 10px;
-  background: var(--surface-muted);
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
 .meta {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-muted);
 }
 
@@ -424,78 +358,10 @@ onMounted(load)
   padding-top: 4px;
 }
 
-.badge {
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.badge.draft {
-  background: #f0f2f5;
-  color: #6e7781;
-}
-
-.badge.published {
-  background: #e6f4ea;
-  color: #1a7f37;
-}
-
-.badge.archived {
-  background: #fff8c5;
-  color: #7d4e00;
-}
-
-.btn {
-  padding: 6px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-  text-decoration: none;
-  color: inherit;
-  font-size: 13px;
-}
-
-.btn.danger {
-  color: #cf222e;
-  border-color: #ffcecb;
-}
-
-.btn-primary {
-  padding: 6px 14px;
-  border: none;
-  border-radius: 6px;
-  background: #1a7f37;
-  color: #fff;
-  cursor: pointer;
-  text-decoration: none;
-  font-size: 13px;
-}
-
-.btn:disabled,
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.empty {
-  text-align: center;
-  padding: 40px 0;
-}
-
 .pager {
   display: flex;
   align-items: center;
   gap: 12px;
   margin-top: 16px;
-}
-
-.error {
-  color: #d1242f;
-}
-
-.ok {
-  color: #1a7f37;
 }
 </style>

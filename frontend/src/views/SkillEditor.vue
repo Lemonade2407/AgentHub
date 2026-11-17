@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { DOCUMENT_ACCEPT, extractDocumentText } from '../utils/document-text'
 import {
   SKILL_CATEGORIES,
   parametersFromSchema,
@@ -51,6 +52,13 @@ const error = ref('')
 const message = ref('')
 
 const previewValues = reactive<Record<string, string>>({})
+
+// 指令片段文档导入（浏览器本地解析，不上传文件）
+const instructionFileInput = ref<HTMLInputElement | null>(null)
+const instructionUploading = ref(false)
+const instructionMessage = ref('')
+const instructionOk = ref(true)
+const MAX_INSTRUCTIONS_LENGTH = 20000
 
 const parsedSchema = computed<{ value: Record<string, unknown> | null; error: string }>(() => {
   try {
@@ -130,6 +138,51 @@ async function loadSkill() {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     loading.value = false
+  }
+}
+
+async function onInstructionDocumentSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  instructionMessage.value = ''
+  if (file.size > 10 * 1024 * 1024) {
+    instructionOk.value = false
+    instructionMessage.value = '文件不能超过 10MB'
+    return
+  }
+
+  instructionUploading.value = true
+  try {
+    const raw = await extractDocumentText(file)
+    const text = raw.replace(/\r\n/g, '\n').trim()
+    if (!text) {
+      throw new Error('未解析到文字，扫描版 PDF 暂不支持')
+    }
+
+    const current = form.instructions.trimEnd()
+    const header = current ? `\n\n--- 文档：${file.name} ---\n` : ''
+    const available = MAX_INSTRUCTIONS_LENGTH - current.length - header.length
+    if (available <= 0) {
+      instructionOk.value = false
+      instructionMessage.value = '指令片段已达到 20000 字上限，请先精简后再上传'
+      return
+    }
+
+    const body = text.slice(0, available)
+    form.instructions = (current + header + body).slice(0, MAX_INSTRUCTIONS_LENGTH)
+    instructionOk.value = body.length >= text.length
+    instructionMessage.value =
+      body.length < text.length
+        ? `「${file.name}」内容较长，已截断到 20000 字上限`
+        : `已追加「${file.name}」共 ${body.length} 字`
+  } catch (e) {
+    instructionOk.value = false
+    instructionMessage.value = e instanceof Error ? e.message : '文档解析失败'
+  } finally {
+    instructionUploading.value = false
   }
 }
 
@@ -337,11 +390,11 @@ onMounted(async () => {
         <fieldset :disabled="!owned">
           <div class="row two">
             <label>
-              <span>名称 *</span>
+              <span>名称</span>
               <input v-model="form.name" type="text" maxlength="64" required />
             </label>
             <label>
-              <span>Slug</span>
+              <span>Slug *</span>
               <input v-model="form.slug" type="text" maxlength="80" :placeholder="isNew ? '留空自动生成' : ''" />
             </label>
           </div>
@@ -363,29 +416,49 @@ onMounted(async () => {
 
           <div class="row two">
             <label>
-              <span>图标名</span>
+              <span>图标名 *</span>
               <input v-model="form.icon" type="text" maxlength="64" placeholder="可选，前端图标名" />
             </label>
             <label>
-              <span>标签</span>
+              <span>标签 *</span>
               <input v-model="form.tagsText" type="text" placeholder="用逗号分隔，如：周报, 总结" />
             </label>
           </div>
 
           <label class="row">
-            <span>简介</span>
+            <span>简介 *</span>
             <input v-model="form.summary" type="text" maxlength="512" />
           </label>
 
-          <label class="row">
-            <span v-pre>指令片段（instructions，支持 {{param}} 占位）</span>
+          <div class="row">
+            <div class="row-head">
+              <span>指令片段</span>
+              <button
+                class="btn btn-sm"
+                type="button"
+                :disabled="instructionUploading || !owned"
+                @click="instructionFileInput?.click()"
+              >
+                {{ instructionUploading ? '解析中…' : '上传文档' }}
+              </button>
+              <input
+                ref="instructionFileInput"
+                type="file"
+                :accept="DOCUMENT_ACCEPT"
+                hidden
+                @change="onInstructionDocumentSelected"
+              />
+            </div>
             <textarea
               v-model="form.instructions"
               rows="8"
               maxlength="20000"
-              :placeholder="'例如：请用 {{tone}} 的语气，把本周 Git 提交整理成周报。'"
+              :placeholder="'写清这个 Skill 的执行步骤、工具调用方式和输出格式。\n可用 {{tone}} 这类参数占位，挂载到 Agent 时再填写具体值。'"
             ></textarea>
-          </label>
+            <small v-if="instructionMessage" :class="instructionOk ? 'ok' : 'error'">
+              {{ instructionMessage }}
+            </small>
+          </div>
 
           <label class="row">
             <span>参数契约 input_schema（JSON Schema 子集）</span>
@@ -397,7 +470,7 @@ onMounted(async () => {
           </label>
 
           <div class="row">
-            <span>绑定工具（Skill 挂载到 Agent 后自动进入候选工具池）</span>
+            <span>绑定工具（Skill 挂载到 Agent 后自动进入候选工具池）*</span>
             <div v-if="tools.length" class="tool-list">
               <div v-for="tool in tools" :key="tool.id" class="tool-item">
                 <label class="tool-check">
@@ -533,7 +606,7 @@ onMounted(async () => {
 
 .editor,
 .preview {
-  background: #fff;
+  background: var(--bg-panel);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   padding: 18px;
@@ -551,6 +624,22 @@ fieldset {
   flex-direction: column;
   gap: 6px;
   margin-bottom: 14px;
+}
+
+.row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.row-head > span {
+  flex: 1;
+}
+
+.row-head .btn {
+  flex-shrink: 0;
+  font-weight: 400;
 }
 
 .row.two {
@@ -640,19 +729,19 @@ textarea {
 }
 
 .risk.read_only {
-  background: #e6f4ea;
-  color: #1a7f37;
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .risk.low_risk {
-  background: #fff8c5;
-  color: #7d4e00;
+  background: var(--warn-soft);
+  color: var(--warn);
 }
 
 .risk.write,
 .risk.high_risk {
-  background: #ffebe9;
-  color: #cf222e;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .actions {
@@ -700,7 +789,7 @@ textarea {
 }
 
 .required-mark {
-  color: #cf222e;
+  color: var(--danger);
   font-style: normal;
 }
 
@@ -734,39 +823,39 @@ textarea {
 }
 
 .badge.draft {
-  background: #f0f2f5;
-  color: #6e7781;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
 }
 
 .badge.published {
-  background: #e6f4ea;
-  color: #1a7f37;
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .badge.archived {
-  background: #fff8c5;
-  color: #7d4e00;
+  background: var(--warn-soft);
+  color: var(--warn);
 }
 
 .btn {
   padding: 6px 12px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: #fff;
+  background: var(--bg-panel);
   cursor: pointer;
   font-size: 13px;
 }
 
 .btn.danger {
-  color: #cf222e;
-  border-color: #ffcecb;
+  color: var(--danger);
+  border-color: rgba(240, 93, 93, 0.35);
 }
 
 .btn-primary {
   padding: 8px 16px;
-  border: none;
+  border: 1px solid var(--accent);
   border-radius: 6px;
-  background: #1a7f37;
+  background: var(--accent);
   color: #fff;
   cursor: pointer;
   font-size: 13px;
@@ -779,20 +868,20 @@ textarea {
 }
 
 .notice {
-  background: #ddf4ff;
-  border: 1px solid #b6e3ff;
-  color: #0969da;
+  background: var(--accent-soft);
+  border: 1px solid rgba(77, 107, 254, 0.35);
+  color: var(--accent-hover);
   border-radius: 8px;
   padding: 8px 12px;
   font-size: 13px;
 }
 
 .error {
-  color: #d1242f;
+  color: var(--danger);
 }
 
 .ok {
-  color: #1a7f37;
+  color: var(--success);
 }
 
 .muted {

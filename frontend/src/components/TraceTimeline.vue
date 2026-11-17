@@ -1,36 +1,26 @@
 <script setup lang="ts">
-// TraceEvent 公共外层字段契约见 AgentHub_接口契约文档.md §5.3
-export interface TraceEvent {
-  run_id: string
-  step_no: number
-  event_type: string
-  status: string
-  node: string | null
-  tool: string | null
-  duration_ms: number | null
-  data: Record<string, unknown> | null
-  timestamp: string
-}
+import type { TraceEvent } from '../types/api'
 
 defineProps<{
   events: TraceEvent[]
 }>()
 
+const LABELS: Record<string, string> = {
+  RUN_STARTED: 'Run 开始',
+  TOOL_CANDIDATES: '工具筛选',
+  SKILL_INJECTED: 'Skill 注入',
+  SKILL_TOOL_MISSING: 'Skill 工具缺失',
+  LLM_STARTED: 'LLM 调用',
+  LLM_FINISHED: 'LLM 完成',
+  TOOL_CALL_STARTED: '工具调用',
+  TOOL_CALL_FINISHED: '工具完成',
+  STATE_UPDATED: '状态更新',
+  RUN_FINISHED: 'Run 完成',
+  RUN_FAILED: 'Run 失败',
+}
+
 function eventLabel(eventType: string): string {
-  const map: Record<string, string> = {
-    RUN_STARTED: 'Run 开始',
-    TOOL_CANDIDATES: '工具筛选',
-    SKILL_INJECTED: 'Skill 注入',
-    SKILL_TOOL_MISSING: 'Skill 工具缺失',
-    LLM_STARTED: 'LLM 调用',
-    LLM_FINISHED: 'LLM 完成',
-    TOOL_CALL_STARTED: '工具调用',
-    TOOL_CALL_FINISHED: '工具完成',
-    STATE_UPDATED: '状态更新',
-    RUN_FINISHED: 'Run 完成',
-    RUN_FAILED: 'Run 失败',
-  }
-  return map[eventType] ?? eventType
+  return LABELS[eventType] ?? eventType
 }
 
 interface CandidateView {
@@ -63,13 +53,14 @@ function names(value: unknown): string {
 function statusClass(status: string): string {
   if (status === 'SUCCESS') return 'on'
   if (status === 'RUNNING') return 'running'
+  if (status === 'SKIPPED') return 'skipped'
   return 'error'
 }
 
 function fmtTs(ts: string): string {
-  const d = new Date(ts)
-  if (Number.isNaN(d.getTime())) return ts
-  return d.toTimeString().slice(0, 8)
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return ts
+  return date.toTimeString().slice(0, 8)
 }
 
 function fmtDuration(ms: number | null): string {
@@ -89,139 +80,162 @@ function jsonText(data: Record<string, unknown> | null): string {
 
 <template>
   <div class="timeline">
-    <div v-for="(e, i) in events" :key="i" class="event">
+    <div v-for="(event, index) in events" :key="index" class="event">
       <div class="rail">
-        <span class="dot" :class="statusClass(e.status)"></span>
-        <span v-if="i < events.length - 1" class="line"></span>
+        <span class="dot" :class="statusClass(event.status)"></span>
+        <span v-if="index < events.length - 1" class="line"></span>
       </div>
 
       <div class="card">
         <div class="head">
-          <span class="label">{{ eventLabel(e.event_type) }}</span>
+          <span class="label">{{ eventLabel(event.event_type) }}</span>
           <span class="meta">
-            step {{ e.step_no }}
-            <template v-if="e.node">&middot; {{ e.node }}</template>
-            <template v-if="e.tool">&middot; <code>{{ e.tool }}</code></template>
-            <template v-if="fmtDuration(e.duration_ms)">&middot; {{ fmtDuration(e.duration_ms) }}</template>
+            step {{ event.step_no }}
+            <template v-if="event.node">· {{ event.node }}</template>
+            <template v-if="event.tool">· <code>{{ event.tool }}</code></template>
+            <template v-if="fmtDuration(event.duration_ms)">· {{ fmtDuration(event.duration_ms) }}</template>
           </span>
-          <span class="time">{{ fmtTs(e.timestamp) }}</span>
+          <span class="time">{{ fmtTs(event.timestamp) }}</span>
         </div>
 
-        <div v-if="e.event_type === 'TOOL_CANDIDATES' && e.data" class="summary-line">
+        <div v-if="event.event_type === 'TOOL_CANDIDATES' && event.data" class="summary-line">
           <span class="muted">
-            策略 {{ text(e.data.strategy, 'none') }} · K={{ text(e.data.top_k, '-') }}
+            策略 {{ text(event.data.strategy, 'none') }} · K={{ text(event.data.top_k, '-') }}
           </span>
-          <span v-for="candidate in candidateRows(e.data)" :key="candidate.name" class="chip">
+          <span v-for="candidate in candidateRows(event.data)" :key="candidate.name" class="chip">
             <code>{{ candidate.name }}</code>
             <em v-if="candidate.score != null">{{ candidate.score.toFixed(2) }}</em>
           </span>
         </div>
 
-        <div v-else-if="e.event_type === 'SKILL_INJECTED' && e.data" class="summary-line">
+        <div v-else-if="event.event_type === 'SKILL_INJECTED' && event.data" class="summary-line">
           <span class="chip on">
-            Skill <code>{{ text(e.data.slug) }}</code> v{{ text(e.data.version) }}
+            Skill <code>{{ text(event.data.slug) }}</code> v{{ text(event.data.version) }}
           </span>
-          <span v-if="names(e.data.tools)" class="muted">贡献工具：{{ names(e.data.tools) }}</span>
+          <span v-if="names(event.data.tools)" class="muted">贡献工具：{{ names(event.data.tools) }}</span>
         </div>
 
-        <div v-else-if="e.event_type === 'SKILL_TOOL_MISSING' && e.data" class="summary-line">
-          <span class="chip bad">缺失 <code>{{ text(e.data.tool) }}</code></span>
+        <div v-else-if="event.event_type === 'SKILL_TOOL_MISSING' && event.data" class="summary-line">
+          <span class="chip bad">缺失 <code>{{ text(event.data.tool) }}</code></span>
           <span class="muted">
-            来自 {{ text(e.data.skill_slug) }} ·
-            {{ e.data.required ? '必填，已拒绝运行' : '可选，已跳过' }}
+            来自 {{ text(event.data.skill_slug) }} ·
+            {{ event.data.required ? '必填，已拒绝运行' : '可选，已跳过' }}
           </span>
         </div>
 
-        <details v-if="e.data" class="detail">
+        <div
+          v-else-if="event.event_type === 'RUN_STARTED' && event.data && (event.data.model_api_name || event.data.model_key)"
+          class="summary-line"
+        >
+          <span v-if="event.data.model_api_name" class="chip">
+            模型 API <code>{{ text(event.data.model_api_name) }}</code>
+          </span>
+          <span v-if="event.data.model_key" class="chip">
+            <code>{{ text(event.data.model_key) }}</code>
+          </span>
+        </div>
+
+        <details v-if="event.data" class="detail">
           <summary>查看数据</summary>
-          <pre>{{ jsonText(e.data) }}</pre>
+          <pre>{{ jsonText(event.data) }}</pre>
         </details>
       </div>
     </div>
 
-    <p v-if="!events.length" class="muted empty">尚无事件。提交任务后，Agent 的每一步执行过程会实时显示在这里。</p>
+    <p v-if="!events.length" class="muted empty">
+      尚无事件。提交任务后，Agent 的每一步执行过程会实时显示在这里。
+    </p>
   </div>
 </template>
 
 <style scoped>
 .timeline {
-  padding-top: 4px;
+  padding-top: 2px;
 }
 
 .event {
   display: flex;
-  gap: 12px;
+  gap: 10px;
 }
 
 .rail {
   display: flex;
   flex-direction: column;
   align-items: center;
-  width: 12px;
+  width: 10px;
   flex-shrink: 0;
 }
 
 .dot {
-  width: 12px;
-  height: 12px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  margin-top: 6px;
+  margin-top: 8px;
+  background: var(--text-muted);
 }
 
 .dot.on {
-  background: #1a7f37;
+  background: var(--success);
 }
 
 .dot.running {
-  background: #1f6feb;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.dot.skipped {
+  background: var(--warn);
 }
 
 .dot.error {
-  background: #cf222e;
+  background: var(--danger);
 }
 
 .line {
   flex: 1;
-  width: 2px;
+  width: 1px;
   background: var(--border-color);
   margin: 4px 0;
 }
 
 .card {
   flex: 1;
-  margin-bottom: 10px;
-  background: #fff;
+  min-width: 0;
+  margin-bottom: 8px;
+  background: var(--bg-elevated);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
 }
 
 .head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }
 
 .label {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 12.5px;
+  color: var(--text-main);
 }
 
 .meta {
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-muted);
 }
 
 .time {
   margin-left: auto;
-  font-size: 12px;
+  font-size: 10.5px;
   color: var(--text-muted);
+  font-family: var(--font-mono);
 }
 
 .detail {
-  margin-top: 8px;
-  font-size: 13px;
+  margin-top: 6px;
+  font-size: 12px;
 }
 
 .summary-line {
@@ -229,18 +243,19 @@ function jsonText(data: Record<string, unknown> | null): string {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: 6px;
+  font-size: 11.5px;
 }
 
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--surface-muted);
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--bg-panel);
   border: 1px solid var(--border-color);
+  color: var(--text-secondary);
 }
 
 .chip em {
@@ -249,33 +264,39 @@ function jsonText(data: Record<string, unknown> | null): string {
 }
 
 .chip.on {
-  background: #e6f4ea;
-  border-color: #b7e1c4;
-  color: #1a7f37;
+  background: var(--success-soft);
+  border-color: rgba(63, 185, 80, 0.35);
+  color: var(--success);
 }
 
 .chip.bad {
-  background: #ffebe9;
-  border-color: #ffcecb;
-  color: #cf222e;
+  background: var(--danger-soft);
+  border-color: rgba(240, 93, 93, 0.35);
+  color: var(--danger);
 }
 
 .detail summary {
   cursor: pointer;
   color: var(--text-muted);
+  font-size: 11.5px;
 }
 
 .detail pre {
-  background: var(--surface-muted);
+  margin: 6px 0 0;
+  background: var(--bg-base);
+  border: 1px solid var(--border-color);
   border-radius: 6px;
-  padding: 10px;
-  font-size: 12px;
+  padding: 8px;
+  font-size: 11px;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
+  max-height: 240px;
 }
 
 .empty {
   text-align: center;
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

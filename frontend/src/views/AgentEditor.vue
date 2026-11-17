@@ -1,6 +1,12 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { api, errorMessage } from '../api/http'
+import ModelSelector from '../components/ModelSelector.vue'
+import PublishDialog from '../components/PublishDialog.vue'
+import RunPanel from '../components/RunPanel.vue'
+import { DOCUMENT_ACCEPT, extractDocumentText } from '../utils/document-text'
+import type { Agent } from '../types/api'
 import {
   statusLabel,
   type AgentSkill,
@@ -9,19 +15,15 @@ import {
   type ToolDefinition,
 } from '../types/skill'
 
-// DTO 与 AgentHub_接口契约文档.md §3.1 / §4.1 一致（snake_case）
-interface Agent {
-  id: number
-  name: string
-  description: string | null
-  model: string
-  system_prompt: string
-  max_steps: number
-  enabled: boolean
-  tool_ids: number[]
-  created_at: string
-  updated_at: string
-}
+type TabKey = 'basic' | 'model' | 'skills' | 'tools' | 'debug'
+
+const TABS: { key: TabKey; label: string }[] = [
+  { key: 'basic', label: '基础' },
+  { key: 'model', label: '模型' },
+  { key: 'skills', label: 'Skills' },
+  { key: 'tools', label: '工具' },
+  { key: 'debug', label: '调试' },
+]
 
 interface AgentSkillDraft extends AgentSkill {
   params_text: string
@@ -31,10 +33,13 @@ const route = useRoute()
 const router = useRouter()
 
 const rawId = computed(() => {
-  const v = route.params.id
-  return Array.isArray(v) ? v[0] : v
+  const value = route.params.id
+  return Array.isArray(value) ? value[0] : value
 })
 const isEdit = computed(() => rawId.value !== 'new')
+const agentId = computed(() => Number(rawId.value))
+
+const activeTab = ref<TabKey>('basic')
 
 const form = ref({
   name: '',
@@ -51,8 +56,17 @@ const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
 const successMsg = ref('')
+const publishOpen = ref(false)
 
-// ---- V2：Skill 挂载 ----
+// System Prompt 文档导入（浏览器本地解析，不上传文件）
+const fileInput = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
+const uploadMessage = ref('')
+const uploadOk = ref(true)
+
+const MAX_PROMPT_LENGTH = 8000
+
+// Skill 挂载
 const agentSkills = ref<AgentSkillDraft[]>([])
 const availableSkills = ref<Skill[]>([])
 const newSkillId = ref<number | null>(null)
@@ -64,7 +78,6 @@ const mountedSkillIds = computed(() => new Set(agentSkills.value.map((item) => i
 const selectableSkills = computed(() =>
   availableSkills.value.filter((skill) => !mountedSkillIds.value.has(skill.id)),
 )
-// 由 Skill 自动带入的工具：以只读标签展示，避免与显式绑定混淆
 const skillContributedTools = computed(() => {
   const map = new Map<string, string>()
   for (const skill of agentSkills.value) {
@@ -74,84 +87,107 @@ const skillContributedTools = computed(() => {
   return map
 })
 
-// 模型为自由字符串，V1 约定 provider/model 形式（契约 §2.8）
-const commonModels = ['deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'qwen/qwen-plus']
-
-function failMessage(resp: Response): Promise<string> {
-  return resp
-    .json()
-    .catch(() => null)
-    .then((b) => b?.message ?? `HTTP ${resp.status}`)
-}
 
 async function loadAgent() {
   if (!isEdit.value) return
   loading.value = true
   error.value = ''
   try {
-    const resp = await fetch(`/api/agents/${rawId.value}`)
-    if (!resp.ok) throw new Error(await failMessage(resp))
-    const a: Agent = await resp.json()
+    const agent = await api.get<Agent>(`/api/agents/${rawId.value}`)
     form.value = {
-      name: a.name,
-      description: a.description ?? '',
-      model: a.model,
-      system_prompt: a.system_prompt,
-      max_steps: a.max_steps,
-      enabled: a.enabled,
-      tool_ids: [...a.tool_ids],
+      name: agent.name,
+      description: agent.description ?? '',
+      model: agent.model,
+      system_prompt: agent.system_prompt,
+      max_steps: agent.max_steps,
+      enabled: agent.enabled,
+      tool_ids: [...agent.tool_ids],
     }
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    error.value = errorMessage(e, 'Agent 加载失败')
   } finally {
     loading.value = false
   }
 }
 
-async function loadTools() {
+async function onDocumentSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  uploadMessage.value = ''
+  if (file.size > 10 * 1024 * 1024) {
+    uploadOk.value = false
+    uploadMessage.value = '文件不能超过 10MB'
+    return
+  }
+
+  uploading.value = true
   try {
-    const resp = await fetch('/api/mcp/tools?page_size=100')
-    if (!resp.ok) return
-    const data: Page<ToolDefinition> = await resp.json()
-    tools.value = data.items.filter((t) => t.enabled)
-  } catch {
-    // 工具列表加载失败不阻断表单
+    const raw = await extractDocumentText(file)
+    const text = raw.replace(/\r\n/g, '\n').trim()
+    if (!text) {
+      throw new Error('未解析到文字，扫描版 PDF 暂不支持')
+    }
+
+    const current = form.value.system_prompt.trimEnd()
+    const header = current ? `\n\n--- 文档：${file.name} ---\n` : ''
+    const available = MAX_PROMPT_LENGTH - current.length - header.length
+    if (available <= 0) {
+      uploadOk.value = false
+      uploadMessage.value = 'System Prompt 已达到 8000 字上限，请先精简后再上传'
+      return
+    }
+
+    const body = text.slice(0, available)
+    form.value.system_prompt = (current + header + body).slice(0, MAX_PROMPT_LENGTH)
+    uploadOk.value = body.length >= text.length
+    uploadMessage.value =
+      body.length < text.length
+        ? `「${file.name}」内容较长，已截断到 8000 字上限`
+        : `已追加「${file.name}」共 ${body.length} 字`
+  } catch (e) {
+    uploadOk.value = false
+    uploadMessage.value = e instanceof Error ? e.message : '文档解析失败'
+  } finally {
+    uploading.value = false
   }
 }
 
-function toggleTool(id: number) {
-  const i = form.value.tool_ids.indexOf(id)
-  if (i >= 0) form.value.tool_ids.splice(i, 1)
-  else form.value.tool_ids.push(id)
-}
-
-// ---- V2：Skill 挂载 ----
-
-function toDraft(skill: AgentSkill): AgentSkillDraft {
-  return { ...skill, params_text: JSON.stringify(skill.params ?? {}, null, 0) }
+async function loadTools() {
+  try {
+    const data = await api.get<Page<ToolDefinition>>('/api/mcp/tools?page_size=100')
+    tools.value = data.items.filter((tool) => tool.enabled)
+  } catch {
+    // 工具列表失败不阻断表单
+  }
 }
 
 async function loadAgentSkills() {
   if (!isEdit.value) return
   skillsLoading.value = true
   try {
-    const [mineResp, mountedResp] = await Promise.all([
-      fetch('/api/skills?page_size=100'),
-      fetch(`/api/agents/${rawId.value}/skills`),
+    const [mine, mounted] = await Promise.all([
+      api.get<Page<Skill>>('/api/skills?page_size=100'),
+      api.get<AgentSkill[]>(`/api/agents/${rawId.value}/skills`),
     ])
-    if (mineResp.ok) {
-      const data: Page<Skill> = await mineResp.json()
-      availableSkills.value = data.items
-    }
-    if (mountedResp.ok) {
-      const data: AgentSkill[] = await mountedResp.json()
-      agentSkills.value = data.map(toDraft)
-    }
+    availableSkills.value = mine.items
+    agentSkills.value = mounted.map((skill) => ({
+      ...skill,
+      params_text: JSON.stringify(skill.params ?? {}, null, 0),
+    }))
   } catch {
-    // Skill 列表失败不阻断 Agent 基础表单
+    // Skill 列表失败不阻断基础表单
   } finally {
     skillsLoading.value = false
   }
+}
+
+function toggleTool(id: number) {
+  const index = form.value.tool_ids.indexOf(id)
+  if (index >= 0) form.value.tool_ids.splice(index, 1)
+  else form.value.tool_ids.push(id)
 }
 
 function addSkill() {
@@ -213,68 +249,80 @@ async function saveSkills() {
         params: parseParams(skill),
       })),
     }
-    const resp = await fetch(`/api/agents/${rawId.value}/skills`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    })
-    if (!resp.ok) throw new Error(await failMessage(resp))
-    const data: AgentSkill[] = await resp.json()
-    agentSkills.value = data.map(toDraft)
+    const data = await api.put<AgentSkill[]>(`/api/agents/${rawId.value}/skills`, payload)
+    agentSkills.value = data.map((skill) => ({
+      ...skill,
+      params_text: JSON.stringify(skill.params ?? {}, null, 0),
+    }))
     skillsMsg.value = 'Skills 已保存，运行时会按顺序注入'
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    error.value = errorMessage(e, 'Skills 保存失败')
   } finally {
     skillsSaving.value = false
   }
 }
 
 async function save() {
-  saving.value = true
   error.value = ''
   successMsg.value = ''
+  if (!form.value.name.trim()) {
+    error.value = '请填写 Agent 名称'
+    activeTab.value = 'basic'
+    return
+  }
+  if (!form.value.model.trim()) {
+    error.value = '请选择或填写模型'
+    activeTab.value = 'model'
+    return
+  }
+
+  saving.value = true
   try {
     if (!isEdit.value) {
-      // 新建：POST AgentCreate（含 tool_ids）
-      const resp = await fetch('/api/agents', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form.value),
+      const created = await api.post<Agent>('/api/agents', {
+        name: form.value.name,
+        description: form.value.description || null,
+        model: form.value.model,
+        system_prompt: form.value.system_prompt,
+        max_steps: form.value.max_steps,
+        enabled: form.value.enabled,
+        tool_ids: form.value.tool_ids,
       })
-      if (!resp.ok) throw new Error(await failMessage(resp))
-      const created: Agent = await resp.json()
       successMsg.value = `创建成功 #${created.id}`
-      await router.replace(`/agents/${created.id}`) // 切到编辑模式，继续可改
+      await router.replace(`/agents/${created.id}`)
       await loadAgentSkills()
     } else {
-      // 更新：AgentUpdate 部分更新；tool_ids 走独立接口（全量覆盖，契约 §4.1.6）
-      const { tool_ids, ...agentFields } = form.value
-      const resp = await fetch(`/api/agents/${rawId.value}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(agentFields),
+      await api.put<Agent>(`/api/agents/${rawId.value}`, {
+        name: form.value.name,
+        description: form.value.description || null,
+        model: form.value.model,
+        system_prompt: form.value.system_prompt,
+        max_steps: form.value.max_steps,
+        enabled: form.value.enabled,
       })
-      if (!resp.ok) throw new Error(await failMessage(resp))
-      const toolsResp = await fetch(`/api/agents/${rawId.value}/tools`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool_ids }),
+      const updated = await api.put<Agent>(`/api/agents/${rawId.value}/tools`, {
+        tool_ids: form.value.tool_ids,
       })
-      if (!toolsResp.ok) throw new Error(await failMessage(toolsResp))
+      form.value.tool_ids = [...updated.tool_ids]
       successMsg.value = '保存成功'
     }
   } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
+    error.value = errorMessage(e, '保存失败')
   } finally {
     saving.value = false
   }
 }
 
-function goBack() {
-  router.push('/agents')
+function onPublished() {
+  publishOpen.value = false
+  successMsg.value = '发布成功，已出现在 Agent Center'
 }
 
 onMounted(() => {
+  const tab = route.query.tab
+  if (typeof tab === 'string' && TABS.some((item) => item.key === tab)) {
+    activeTab.value = tab as TabKey
+  }
   loadAgent()
   loadTools()
   loadAgentSkills()
@@ -283,100 +331,145 @@ onMounted(() => {
 
 <template>
   <section class="page">
-    <h1>{{ isEdit ? `编辑 Agent #${rawId}` : '新建 Agent' }}</h1>
+    <header class="page-header">
+      <div>
+        <h1 class="page-title">
+          {{ isEdit ? `编辑 Agent #${rawId}` : '新建 Agent' }}
+        </h1>
+      </div>
+      <div class="head-actions">
+        <router-link to="/agents" class="btn">返回列表</router-link>
+        <router-link v-if="isEdit" :to="`/chat?agent=${rawId}`" class="btn">去运行</router-link>
+        <button v-if="isEdit" class="btn" type="button" @click="publishOpen = true">发布</button>
+        <button class="btn-primary" type="button" :disabled="saving" @click="save">
+          {{ saving ? '保存中…' : '保存' }}
+        </button>
+      </div>
+    </header>
 
     <p v-if="loading" class="muted">加载中…</p>
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="successMsg" class="ok">{{ successMsg }}</p>
 
-    <form v-if="!loading" class="form" @submit.prevent="save">
-      <div class="row">
-        <label>名称 *</label>
-        <input v-model="form.name" type="text" maxlength="64" required />
-      </div>
+    <form v-if="!loading" class="editor" @submit.prevent="save">
+      <nav class="tabs">
+        <button
+          v-for="tab in TABS"
+          :key="tab.key"
+          class="tab"
+          :class="{ active: activeTab === tab.key }"
+          type="button"
+          @click="activeTab = tab.key"
+        >
+          {{ tab.label }}
+        </button>
+      </nav>
 
-      <div class="row">
-        <label>描述</label>
-        <input v-model="form.description" type="text" maxlength="512" />
-      </div>
+      <!-- 基础 -->
+      <div v-show="activeTab === 'basic'" class="panel-body">
+        <label class="row">
+          <span>名称</span>
+          <input v-model="form.name" type="text" maxlength="64" required />
+        </label>
 
-      <div class="row">
-        <label>模型 *</label>
-        <input v-model="form.model" type="text" maxlength="128" required list="model-options" />
-        <datalist id="model-options">
-          <option v-for="m in commonModels" :key="m" :value="m" />
-        </datalist>
-      </div>
+        <label class="row">
+          <span>描述</span>
+          <input v-model="form.description" type="text" maxlength="512" />
+        </label>
 
-      <div class="row">
-        <label>System Prompt</label>
-        <textarea v-model="form.system_prompt" rows="6" maxlength="8000"></textarea>
-      </div>
-
-      <div class="row inline">
-        <label>最大执行步数</label>
-        <input v-model.number="form.max_steps" type="number" min="1" max="20" />
-        <span class="muted">1 ~ 20，默认 8</span>
-      </div>
-
-      <div class="row inline">
-        <label>启用</label>
-        <input v-model="form.enabled" type="checkbox" />
-      </div>
-
-      <div class="row">
-        <label>绑定 MCP 工具</label>
-        <div v-if="tools.length" class="tool-list">
-          <label v-for="t in tools" :key="t.id" class="tool-item">
+        <div class="row">
+          <div class="row-head">
+            <span>System Prompt</span>
+            <button
+              class="btn btn-sm"
+              type="button"
+              :disabled="uploading"
+              @click="fileInput?.click()"
+            >
+              {{ uploading ? '解析中…' : '上传文档' }}
+            </button>
             <input
-              type="checkbox"
-              :checked="form.tool_ids.includes(t.id)"
-              :disabled="skillContributedTools.has(t.qualified_name)"
-              @change="toggleTool(t.id)"
+              ref="fileInput"
+              type="file"
+              :accept="DOCUMENT_ACCEPT"
+              hidden
+              @change="onDocumentSelected"
             />
-            <span class="tool-name">
-              <code>{{ t.qualified_name }}</code>
-              <span class="risk" :class="t.risk_level.toLowerCase()">{{ t.risk_level }}</span>
-            </span>
-            <span class="muted desc">{{ t.description }}</span>
-            <span v-if="skillContributedTools.has(t.qualified_name)" class="skill-source">
-              来自 Skill「{{ skillContributedTools.get(t.qualified_name) }}」，自动进入候选池
-            </span>
+          </div>
+          <textarea v-model="form.system_prompt" rows="8" maxlength="8000"></textarea>
+          <small v-if="uploadMessage" :class="uploadOk ? 'ok' : 'error'">{{ uploadMessage }}</small>
+        </div>
+
+        <label class="row">
+          <span>最大执行步数</span>
+          <input v-model.number="form.max_steps" type="number" min="1" max="20" />
+          <small class="muted">1 ~ 20，默认 8；达到上限会提前结束并返回部分结果</small>
+        </label>
+
+        <div class="row enable-block">
+          <label class="switch-row">
+            <span>启用 Agent</span>
+            <input v-model="form.enabled" type="checkbox" />
+            <small class="muted">停用后不能发起新的 Run，配置和历史记录保留</small>
           </label>
         </div>
-        <p v-else class="muted">暂无可用工具，请先在 MCP Center 完成 Server 发现。</p>
       </div>
 
-      <div class="row">
-        <label>挂载 Skills</label>
+      <!-- 模型 -->
+      <div v-show="activeTab === 'model'" class="panel-body">
+        <div class="row">
+          <div class="row-head">
+            <span>模型标识（provider/model）</span>
+            <ModelSelector :model-value="form.model" @update:model-value="form.model = $event" />
+          </div>
+          <input v-model="form.model" type="text" maxlength="128" required />
+          <small class="muted">
+            选择模型 API 下的模型会自动写入该字段；后端 WP-1.5 落地后将优先使用
+            <code>model_api_id + model_key</code>，此处作为兼容回退。
+          </small>
+        </div>
+
+        <div class="hint-card">
+          <p class="block-title">为什么这里只有 temperature？</p>
+          <p class="muted">
+            V2 只保留 temperature（0~2）作为可调参数，其余高级参数进入 V3。当前后端的 Agent
+            DTO 尚未包含该字段，界面先保持只读说明，避免保存时被静默丢弃。
+          </p>
+        </div>
+
+        <router-link to="/settings/models" class="btn">管理模型 API</router-link>
+      </div>
+
+      <!-- Skills -->
+      <div v-show="activeTab === 'skills'" class="panel-body">
         <p v-if="!isEdit" class="muted">保存 Agent 后可挂载 Skill。</p>
         <template v-else>
           <div class="skill-add">
             <select v-model.number="newSkillId">
               <option :value="null">选择要挂载的 Skill</option>
-              <option v-for="s in selectableSkills" :key="s.id" :value="s.id">
-                {{ s.name }} · v{{ s.version }}
+              <option v-for="skill in selectableSkills" :key="skill.id" :value="skill.id">
+                {{ skill.name }} · v{{ skill.version }}
               </option>
             </select>
             <button class="btn" type="button" @click="addSkill">挂载</button>
-            <router-link to="/skills" class="btn" target="_blank">管理 Skills</router-link>
+            <router-link to="/skills" class="btn">管理 Skills</router-link>
           </div>
 
           <p v-if="skillsLoading" class="muted">加载中…</p>
 
           <div v-if="agentSkills.length" class="skill-list">
-            <div v-for="(s, index) in agentSkills" :key="s.skill_id" class="skill-item">
+            <div v-for="(skill, index) in agentSkills" :key="skill.skill_id" class="skill-item">
               <div class="skill-head">
-                <strong>{{ index + 1 }}. {{ s.name }}</strong>
-                <code class="muted">{{ s.slug }} · v{{ s.version }}</code>
-                <span class="badge" :class="s.status">{{ statusLabel(s.status) }}</span>
+                <strong>{{ index + 1 }}. {{ skill.name }}</strong>
+                <code class="muted">{{ skill.slug }} · v{{ skill.version }}</code>
+                <span class="badge" :class="skill.status">{{ statusLabel(skill.status) }}</span>
                 <label class="inline-check">
-                  <input v-model="s.enabled" type="checkbox" />
+                  <input v-model="skill.enabled" type="checkbox" />
                   启用
                 </label>
                 <span class="spacer"></span>
                 <button
-                  class="btn tiny"
+                  class="btn btn-sm"
                   type="button"
                   :disabled="index === 0"
                   @click="moveSkill(index, -1)"
@@ -384,28 +477,33 @@ onMounted(() => {
                   ↑
                 </button>
                 <button
-                  class="btn tiny"
+                  class="btn btn-sm"
                   type="button"
                   :disabled="index === agentSkills.length - 1"
                   @click="moveSkill(index, 1)"
                 >
                   ↓
                 </button>
-                <button class="btn tiny danger" type="button" @click="removeSkill(index)">
+                <button class="btn btn-sm btn-danger" type="button" @click="removeSkill(index)">
                   移除
                 </button>
               </div>
 
-              <div v-if="s.tools.length" class="skill-tools">
+              <div v-if="skill.tools.length" class="skill-tools">
                 <span class="muted">Skill 工具：</span>
-                <span v-for="t in s.tools" :key="t.tool_id" class="tag" :class="{ off: !t.enabled }">
-                  {{ t.qualified_name }}
+                <span
+                  v-for="tool in skill.tools"
+                  :key="tool.tool_id"
+                  class="tag"
+                  :class="{ off: !tool.enabled }"
+                >
+                  {{ tool.qualified_name }}
                 </span>
               </div>
 
               <label class="params">
                 <span>参数覆盖（JSON，覆盖 Skill 默认值）</span>
-                <input v-model="s.params_text" type="text" placeholder='{"tone":"正式"}' />
+                <input v-model="skill.params_text" type="text" placeholder='{"tone":"正式"}' />
               </label>
             </div>
           </div>
@@ -422,55 +520,251 @@ onMounted(() => {
         </template>
       </div>
 
-      <div class="actions">
-        <button class="btn-primary" type="submit" :disabled="saving">
-          {{ saving ? '保存中…' : '保存' }}
-        </button>
-        <button class="btn" type="button" @click="goBack">返回列表</button>
+      <!-- 工具 -->
+      <div v-show="activeTab === 'tools'" class="panel-body">
+        <p class="muted tool-note">
+          显式绑定的工具与 Skill 带来的工具会合并为候选池（Top-K 不变）。来自 Skill 的工具以只读标签展示。
+        </p>
+        <div v-if="tools.length" class="tool-list">
+          <label v-for="tool in tools" :key="tool.id" class="tool-item">
+            <input
+              type="checkbox"
+              :checked="form.tool_ids.includes(tool.id)"
+              :disabled="skillContributedTools.has(tool.qualified_name)"
+              @change="toggleTool(tool.id)"
+            />
+            <span class="tool-name">
+              <code>{{ tool.qualified_name }}</code>
+              <span class="risk" :class="tool.risk_level.toLowerCase()">{{ tool.risk_level }}</span>
+            </span>
+            <span class="muted desc">{{ tool.description }}</span>
+            <span v-if="skillContributedTools.has(tool.qualified_name)" class="skill-source">
+              来自 Skill「{{ skillContributedTools.get(tool.qualified_name) }}」，自动进入候选池
+            </span>
+          </label>
+        </div>
+        <p v-else class="muted">暂无可用工具，请先在 MCP Hub 完成 Server 发现。</p>
+      </div>
+
+      <!-- 调试 -->
+      <div v-show="activeTab === 'debug'" class="panel-body">
+        <template v-if="isEdit">
+          <RunPanel :agent-id="agentId" :agent-name="form.name" />
+        </template>
+        <p v-else class="muted">保存 Agent 后可在此直接调试运行。</p>
       </div>
     </form>
+
+    <PublishDialog
+      v-if="publishOpen"
+      :agent-id="agentId"
+      :name="form.name"
+      :description="form.description || null"
+      @close="publishOpen = false"
+      @published="onPublished"
+    />
   </section>
 </template>
 
 <style scoped>
-.form {
-  max-width: 760px;
-  background: #fff;
+.head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.editor {
+  background: var(--bg-panel);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.editor .tabs {
+  margin: 0;
+  padding: 0 16px;
+  background: var(--bg-panel);
+}
+
+.panel-body {
   padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 860px;
 }
 
 .row {
-  margin-bottom: 16px;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.row.inline {
-  flex-direction: row;
+.row > span,
+.row > label > span {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.row-head {
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
 }
 
-.row label {
+.row-head > span {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.row small {
+  font-size: 11.5px;
+}
+
+.row.two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.row.two > label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.switch-row {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+  flex-wrap: wrap;
+}
+
+.enable-block {
+  border-top: 1px solid var(--border-color);
+  padding-top: 16px;
+}
+
+.switch-row > span {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.block-title {
+  margin: 0 0 2px;
+  font-size: 12.5px;
   font-weight: 600;
-  font-size: 14px;
 }
 
-.row input[type='text'],
-.row input[type='number'] {
-  padding: 8px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
-.row textarea {
-  padding: 8px 10px;
+.hint-card {
+  padding: 12px 14px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  font-family: inherit;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+
+.hint-card p:last-child {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.skill-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.skill-add select {
+  min-width: 240px;
+}
+
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.skill-item {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-elevated);
+}
+
+.skill-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.skill-head code {
+  font-size: 11.5px;
+}
+
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.skill-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.tag.off {
+  color: var(--danger);
+  text-decoration: line-through;
+}
+
+.params {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.params span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.params input {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.skill-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tool-note {
+  margin: 0;
+  font-size: 12px;
 }
 
 .tool-list {
@@ -486,8 +780,9 @@ onMounted(() => {
   gap: 10px;
   padding: 8px 10px;
   border: 1px solid var(--border-color);
-  border-radius: 6px;
-  font-size: 13px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  background: var(--bg-elevated);
 }
 
 .tool-name {
@@ -500,202 +795,51 @@ onMounted(() => {
 .tool-item .desc {
   flex: 1;
   min-width: 160px;
+  font-size: 11.5px;
 }
 
 .skill-source {
   flex-basis: 100%;
   padding-left: 24px;
-  font-size: 12px;
-  color: #0969da;
-}
-
-.skill-add {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  align-items: center;
-}
-
-.skill-add select {
-  padding: 7px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: #fff;
-  min-width: 220px;
-}
-
-.skill-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.skill-item {
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.skill-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.skill-head code {
-  font-size: 12px;
-}
-
-.inline-check {
-  display: flex !important;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-muted);
-  font-weight: 400 !important;
-}
-
-.spacer {
-  flex: 1;
-}
-
-.btn.tiny {
-  padding: 2px 8px;
-  font-size: 12px;
-}
-
-.btn.tiny.danger {
-  color: #cf222e;
-  border-color: #ffcecb;
-}
-
-.skill-tools {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-}
-
-.tag {
-  padding: 1px 8px;
-  border-radius: 10px;
-  background: var(--surface-muted);
-  color: #444;
-  font-size: 12px;
-}
-
-.tag.off {
-  color: #cf222e;
-  text-decoration: line-through;
-}
-
-.params {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.params span {
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--text-muted);
-}
-
-.params input {
-  padding: 6px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
-}
-
-.skill-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.badge {
-  padding: 1px 8px;
-  border-radius: 10px;
   font-size: 11px;
-}
-
-.badge.draft {
-  background: #f0f2f5;
-  color: #6e7781;
-}
-
-.badge.published {
-  background: #e6f4ea;
-  color: #1a7f37;
-}
-
-.badge.archived {
-  background: #fff8c5;
-  color: #7d4e00;
+  color: var(--accent-hover);
 }
 
 .risk {
   padding: 1px 6px;
-  border-radius: 8px;
-  font-size: 11px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  background: var(--bg-panel);
+  color: var(--text-secondary);
 }
 
 .risk.read_only {
-  background: #e6f4ea;
-  color: #1a7f37;
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .risk.low_risk {
-  background: #fff8c5;
-  color: #7d4e00;
+  background: var(--warn-soft);
+  color: var(--warn);
 }
 
-.risk.write {
-  background: #ffebe9;
-  color: #cf222e;
+.risk.write,
+.risk.high_risk {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
-.actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 8px;
-}
+@media (max-width: 768px) {
+  .row.two {
+    grid-template-columns: 1fr;
+  }
 
-.btn {
-  padding: 8px 14px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-}
+  .page-header {
+    flex-direction: column;
+  }
 
-.btn-primary {
-  padding: 8px 14px;
-  border: none;
-  border-radius: 6px;
-  background: #1a7f37;
-  color: #fff;
-  cursor: pointer;
-}
-
-.btn:disabled,
-.btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.error {
-  color: #d1242f;
-}
-
-.ok {
-  color: #1a7f37;
+  .head-actions {
+    justify-content: flex-start;
+  }
 }
 </style>

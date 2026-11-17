@@ -367,12 +367,12 @@ onMounted(() => {
         <h3>{{ editing ? `编辑 Server #${editing.id}` : '注册 MCP Server' }}</h3>
 
         <div class="row">
-          <label>名称 *（唯一，注册后不可修改）</label>
+          <label>名称（唯一，注册后不可修改）</label>
           <input v-model="form.name" type="text" maxlength="64" :disabled="!!editing" required />
         </div>
 
         <div class="row">
-          <label>Endpoint *</label>
+          <label>Endpoint</label>
           <input v-model="form.endpoint" type="text" maxlength="512" placeholder="http://demo-mcp:8100/mcp" required />
         </div>
 
@@ -421,7 +421,7 @@ onMounted(() => {
 .table {
   width: 100%;
   border-collapse: collapse;
-  background: #fff;
+  background: var(--bg-panel);
   border: 1px solid var(--border-color);
   border-radius: 8px;
   overflow: hidden;
@@ -459,18 +459,18 @@ onMounted(() => {
 }
 
 .badge.on {
-  background: #e6f4ea;
-  color: #1a7f37;
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .badge.error {
-  background: #ffebe9;
-  color: #cf222e;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .badge.unknown {
-  background: #f0f2f5;
-  color: #6e7781;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
 }
 
 .risk-cell {
@@ -484,7 +484,7 @@ onMounted(() => {
   padding: 2px 4px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: #fff;
+  background: var(--bg-panel);
   font-size: 11px;
   color: var(--text-muted);
 }
@@ -496,23 +496,23 @@ onMounted(() => {
 }
 
 .risk.read_only {
-  background: #e6f4ea;
-  color: #1a7f37;
+  background: var(--success-soft);
+  color: var(--success);
 }
 
 .risk.low_risk {
-  background: #fff8c5;
-  color: #7d4e00;
+  background: var(--warn-soft);
+  color: var(--warn);
 }
 
 .risk.write {
-  background: #ffebe9;
-  color: #cf222e;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .risk.high_risk {
-  background: #ffebe9;
-  color: #cf222e;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .test-result {
@@ -524,7 +524,7 @@ onMounted(() => {
   padding: 6px 12px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: #fff;
+  background: var(--bg-panel);
   cursor: pointer;
 }
 
@@ -537,7 +537,7 @@ onMounted(() => {
   padding: 6px 14px;
   border: none;
   border-radius: 6px;
-  background: #1a7f37;
+  background: var(--accent);
   color: #fff;
   cursor: pointer;
 }
@@ -553,7 +553,7 @@ onMounted(() => {
 
 .modal {
   width: 480px;
-  background: #fff;
+  background: var(--bg-panel);
   border-radius: 10px;
   padding: 20px;
 }
@@ -594,10 +594,10 @@ onMounted(() => {
 }
 
 .error {
-  color: #d1242f;
+  color: var(--danger);
 }
 
 .ok {
-  color: #1a7f37;
+  color: var(--success);
 }
 </style>
