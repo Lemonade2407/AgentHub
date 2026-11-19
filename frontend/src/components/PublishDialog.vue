@@ -40,7 +40,7 @@ async function submit() {
     emit('published')
   } catch (e) {
     error.value = isRouteMissing(e)
-      ? '发布接口尚未就绪（D：WP-3.1），当前无法生成 Publication。'
+      ? '发布服务暂时不可用，请稍后重试。'
       : errorMessage(e, '发布失败')
   } finally {
     saving.value = false
@@ -53,7 +53,7 @@ async function submit() {
     <form class="modal" @submit.prevent="submit">
       <h3>发布到 Agent Center</h3>
       <p class="modal-desc">
-        发布生成不可变快照：Skill、工具依赖与 Prompt 会被固化，密钥与 headers 不会写入快照。
+        发布会生成固定快照，包含 Skill、工具依赖与 Prompt；密钥与请求头不会写入快照。
       </p>
 
       <label class="row">

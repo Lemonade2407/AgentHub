@@ -10,6 +10,7 @@ const pageSize = ref(20)
 const keyword = ref('')
 const loading = ref(false)
 const error = ref('')
+const busyId = ref<number | null>(null)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 
@@ -43,6 +44,21 @@ function goPage(next: number) {
   void loadAgents()
 }
 
+async function removeAgent(agent: Agent) {
+  if (!window.confirm(`确定删除「${agent.name}」？删除后不会再出现在列表中。`)) return
+  busyId.value = agent.id
+  error.value = ''
+  try {
+    await api.del(`/api/agents/${agent.id}`)
+    if (agents.value.length === 1 && page.value > 1) page.value -= 1
+    await loadAgents()
+  } catch (e) {
+    error.value = errorMessage(e, '删除失败')
+  } finally {
+    busyId.value = null
+  }
+}
+
 onMounted(loadAgents)
 </script>
 
@@ -61,53 +77,50 @@ onMounted(loadAgents)
     <div class="toolbar">
       <input v-model="keyword" type="search" placeholder="按名称搜索" @keyup.enter="search" />
       <button class="btn" type="button" @click="search">搜索</button>
-      <span class="muted count">共 {{ total }} 个</span>
+      <span class="muted count">共 {{ total }} 条</span>
     </div>
 
     <p v-if="error" class="error-box">{{ error }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
-    <table v-if="!loading && agents.length" class="table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>名称</th>
-          <th>模型</th>
-          <th>最大步数</th>
-          <th>工具</th>
-          <th>状态</th>
-          <th>更新时间</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="agent in agents" :key="agent.id">
-          <td class="muted">{{ agent.id }}</td>
-          <td>
-            <div class="name-cell">
-              <strong>{{ agent.name }}</strong>
-              <span v-if="agent.description" class="desc">{{ agent.description }}</span>
-            </div>
-          </td>
-          <td><code class="model">{{ agent.model }}</code></td>
-          <td>{{ agent.max_steps }}</td>
-          <td>{{ agent.tool_ids.length }}</td>
-          <td>
-            <span class="badge" :class="agent.enabled ? 'on' : 'off'">
-              {{ agent.enabled ? '启用' : '停用' }}
-            </span>
-          </td>
-          <td class="muted time">{{ formatDateTime(agent.updated_at) }}</td>
-          <td class="ops">
+    <div v-if="!loading && agents.length" class="grid">
+      <article v-for="agent in agents" :key="agent.id" class="agent-card">
+        <div class="card-head">
+          <div class="title-block">
+            <h3>{{ agent.name }}</h3>
+            <span v-if="agent.description" class="desc">{{ agent.description }}</span>
+          </div>
+          <span class="badge" :class="agent.enabled ? 'on' : 'off'">
+            {{ agent.enabled ? '启用' : '停用' }}
+          </span>
+        </div>
+
+        <div class="facts">
+          <span class="fact"><em>模型</em><code>{{ agent.model }}</code></span>
+          <span class="fact"><em>步数</em>{{ agent.max_steps }}</span>
+          <span class="fact"><em>工具</em>{{ agent.tool_ids.length }}</span>
+        </div>
+
+        <div class="card-foot">
+          <span class="muted time">更新于 {{ formatDateTime(agent.updated_at) }}</span>
+          <div class="ops">
             <router-link :to="`/agents/${agent.id}`" class="btn btn-sm">编辑</router-link>
             <router-link :to="`/chat?agent=${agent.id}`" class="btn btn-sm">运行</router-link>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+            <button
+              class="btn btn-sm btn-danger"
+              type="button"
+              :disabled="busyId === agent.id"
+              @click="removeAgent(agent)"
+            >
+              {{ busyId === agent.id ? '删除中…' : '删除' }}
+            </button>
+          </div>
+        </div>
+      </article>
+    </div>
 
     <p v-else-if="!loading" class="empty">
-      暂无 Agent，点击右上角「新建 Agent」。
+      还没有 Agent，点击右上角「新建 Agent」。
     </p>
 
     <div v-if="!loading && total > 0" class="pager">
@@ -133,38 +146,97 @@ onMounted(loadAgents)
   font-size: 12px;
 }
 
-.name-cell {
+.agent-card {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  transition: border-color 0.15s ease;
 }
 
-.name-cell strong {
-  font-weight: 500;
+.agent-card:hover {
+  border-color: var(--border-strong);
+}
+
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.title-block {
+  min-width: 0;
+}
+
+.title-block h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-word;
 }
 
 .desc {
+  display: block;
+  margin-top: 2px;
   font-size: 11.5px;
   color: var(--text-muted);
-  max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.model {
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
   font-size: 11.5px;
   color: var(--text-secondary);
 }
 
-.time {
+.fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.fact em {
+  font-style: normal;
+  color: var(--text-muted);
+}
+
+.fact code {
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 11.5px;
+  max-width: 180px;
+}
+
+.card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.time {
+  font-size: 11px;
 }
 
 .ops {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .pager {

@@ -65,6 +65,17 @@ export interface Page<T> {
   page_size: number
 }
 
+const RISK_LEVEL_LABELS: Record<string, string> = {
+  READ_ONLY: '只读',
+  LOW_RISK: '低风险',
+  WRITE: '写入',
+  HIGH_RISK: '高风险',
+}
+
+export function riskLevelLabel(value: string): string {
+  return RISK_LEVEL_LABELS[value] ?? value
+}
+
 export interface SkillParameterSpec {
   name: string
   type: string

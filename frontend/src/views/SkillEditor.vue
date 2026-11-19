@@ -6,6 +6,7 @@ import {
   SKILL_CATEGORIES,
   parametersFromSchema,
   renderInstructions,
+  riskLevelLabel,
   statusLabel,
   type Page,
   type Skill,
@@ -34,11 +35,13 @@ const form = reactive({
   summary: '',
   category: 'general',
   icon: '',
-  version: '1.0.0',
+  version: '',
   instructions: '',
   tagsText: '',
-  schemaText: '{\n  "type": "object",\n  "properties": {}\n}',
+  schemaText: '',
 })
+
+const SCHEMA_PLACEHOLDER = '例如：\n{\n  "type": "object",\n  "properties": {}\n}'
 
 const tools = ref<ToolDefinition[]>([])
 const toolDrafts = ref<ToolDraft[]>([])
@@ -265,7 +268,7 @@ async function save() {
     const saved: Skill = await resp.json()
     skill.value = saved
     owned.value = saved.owned
-    message.value = isNew.value ? '创建成功' : '保存成功'
+    message.value = '保存成功'
     if (isNew.value) router.replace(`/skills/${saved.id}`)
     else await loadSkill()
   } catch (e) {
@@ -353,10 +356,10 @@ onMounted(async () => {
 
 <template>
   <section class="page">
-    <div class="header">
+    <header class="page-header">
       <div>
-        <h1>{{ isNew ? '新建 Skill' : form.name || 'Skill 编辑器' }}</h1>
-        <p v-if="skill" class="muted">
+        <h1 class="page-title">{{ isNew ? '新建 Skill' : form.name || '编辑 Skill' }}</h1>
+        <p v-if="skill" class="muted page-desc">
           {{ skill.slug }} · v{{ skill.version }} ·
           <span class="badge" :class="skill.status">{{ statusLabel(skill.status) }}</span>
           · 作者 {{ skill.owner_display_name || '匿名' }}
@@ -376,7 +379,7 @@ onMounted(async () => {
           安装到我的 Skills
         </button>
       </div>
-    </div>
+    </header>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="message" class="ok">{{ message }}</p>
@@ -410,18 +413,18 @@ onMounted(async () => {
             </label>
             <label>
               <span>版本</span>
-              <input v-model="form.version" type="text" maxlength="16" />
+              <input v-model="form.version" type="text" maxlength="16" placeholder="例如：1.0.0" />
             </label>
           </div>
 
           <div class="row two">
             <label>
               <span>图标名 *</span>
-              <input v-model="form.icon" type="text" maxlength="64" placeholder="可选，前端图标名" />
+              <input v-model="form.icon" type="text" maxlength="64" placeholder="用于界面展示的图标名" />
             </label>
             <label>
               <span>标签 *</span>
-              <input v-model="form.tagsText" type="text" placeholder="用逗号分隔，如：周报, 总结" />
+              <input v-model="form.tagsText" type="text" placeholder="用逗号分隔，例如：周报，总结" />
             </label>
           </div>
 
@@ -451,9 +454,10 @@ onMounted(async () => {
             </div>
             <textarea
               v-model="form.instructions"
+              class="instructions-input"
               rows="8"
               maxlength="20000"
-              :placeholder="'写清这个 Skill 的执行步骤、工具调用方式和输出格式。\n可用 {{tone}} 这类参数占位，挂载到 Agent 时再填写具体值。'"
+              :placeholder="'写清这个 Skill 的执行步骤、工具调用方式和输出格式\n可在指令中用 {{tone}} 表示可变参数，挂载到 Agent 时再填写具体值'"
             ></textarea>
             <small v-if="instructionMessage" :class="instructionOk ? 'ok' : 'error'">
               {{ instructionMessage }}
@@ -461,16 +465,18 @@ onMounted(async () => {
           </div>
 
           <label class="row">
-            <span>参数契约 input_schema（JSON Schema 子集）</span>
-            <textarea v-model="form.schemaText" rows="8" spellcheck="false"></textarea>
+            <span>参数定义 input_schema（JSON Schema）</span>
+            <textarea
+              v-model="form.schemaText"
+              rows="8"
+              spellcheck="false"
+              :placeholder="SCHEMA_PLACEHOLDER"
+            ></textarea>
             <small v-if="parsedSchema.error" class="error">{{ parsedSchema.error }}</small>
-            <small v-else class="muted">
-              示例：{"type":"object","properties":{"tone":{"type":"string","default":"正式"}}}
-            </small>
           </label>
 
           <div class="row">
-            <span>绑定工具（Skill 挂载到 Agent 后自动进入候选工具池）*</span>
+            <span>绑定工具 *</span>
             <div v-if="tools.length" class="tool-list">
               <div v-for="tool in tools" :key="tool.id" class="tool-item">
                 <label class="tool-check">
@@ -481,8 +487,8 @@ onMounted(async () => {
                     @change="toggleTool(tool)"
                   />
                   <code>{{ tool.qualified_name }}</code>
-                  <span class="risk" :class="tool.risk_level.toLowerCase()">{{ tool.risk_level }}</span>
-                  <span v-if="!tool.enabled" class="risk write">已禁用</span>
+                  <span class="risk" :class="tool.risk_level.toLowerCase()">{{ riskLevelLabel(tool.risk_level) }}</span>
+                  <span v-if="!tool.enabled" class="risk write">停用</span>
                 </label>
                 <label v-if="isSelected(tool.id)" class="required">
                   <input
@@ -496,13 +502,13 @@ onMounted(async () => {
                 <span class="muted desc">{{ tool.description }}</span>
               </div>
             </div>
-            <p v-else class="muted">暂无工具，请先在 MCP Center 完成 Server 发现。</p>
+            <p v-else class="muted">还没有工具，请先在 MCP Hub 注册 Server 并发现工具。</p>
           </div>
         </fieldset>
 
         <div v-if="owned" class="actions">
           <button class="btn-primary" type="submit" :disabled="saving || busy">
-            {{ saving ? '保存中…' : isNew ? '创建' : '保存' }}
+            {{ saving ? '保存中…' : '保存' }}
           </button>
         </div>
       </form>
@@ -511,8 +517,8 @@ onMounted(async () => {
         <h2>预览</h2>
 
         <section class="preview-block">
-          <h3>参数表单</h3>
-          <p v-if="!parameters.length" class="muted">未声明参数。</p>
+          <h3>参数表单：</h3>
+          <p v-if="!parameters.length" class="muted">未声明参数</p>
           <div v-for="param in parameters" :key="param.name" class="param-row">
             <label>
               <span>
@@ -537,22 +543,22 @@ onMounted(async () => {
         </section>
 
         <section class="preview-block">
-          <h3>注入片段</h3>
+          <h3>注入片段：</h3>
           <pre v-if="previewText.trim()" class="prompt">{{ previewText }}</pre>
-          <p v-else class="muted">填写 instructions 后可预览渲染结果。</p>
+          <p v-else class="muted">填写 instructions 后可预览渲染结果</p>
         </section>
 
         <section class="preview-block">
-          <h3>最终加入 System Prompt</h3>
-          <pre v-if="form.instructions.trim()" class="prompt">## Skill: {{ form.name || '未命名' }} (v{{ form.version }})
+          <h3>最终加入 System Prompt：</h3>
+          <pre v-if="form.instructions.trim()" class="prompt">## Skill: {{ form.name || '未命名' }} (v{{ form.version || '1.0.0' }})
 
 {{ previewText }}</pre>
-          <p v-else class="muted">纯工具型 Skill 不占用 Prompt 预算。</p>
+          <p v-else class="muted">纯工具型 Skill 不占用 Prompt 预算</p>
         </section>
 
         <section class="preview-block">
-          <h3>本次 Skill 工具</h3>
-          <p v-if="!selectedTools.length" class="muted">未绑定工具。</p>
+          <h3>本次 Skill 工具：</h3>
+          <p v-if="!selectedTools.length" class="muted">未绑定工具</p>
           <ul v-else class="selected-tools">
             <li v-for="item in selectedTools" :key="item.tool.id">
               <code>{{ item.tool.qualified_name }}</code>
@@ -567,23 +573,6 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 12px;
-}
-
-.header h1 {
-  margin: 0 0 4px;
-}
-
-.header p {
-  margin: 0;
-  font-size: 13px;
-}
-
 .header-actions {
   display: flex;
   flex-wrap: wrap;
@@ -674,6 +663,11 @@ textarea {
 textarea {
   resize: vertical;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+/* 指令片段是说明文字，使用与其他输入框一致的字体 */
+textarea.instructions-input {
+  font-family: inherit;
 }
 
 .tool-list {
@@ -785,7 +779,7 @@ textarea {
 }
 
 .param-row small {
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .required-mark {

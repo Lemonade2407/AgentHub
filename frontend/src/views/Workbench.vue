@@ -216,7 +216,7 @@ function handleEvent(payload: MessageEvent) {
     const stopReason = (parsed.data?.stop_reason as string) ?? ''
     finalOutput.value = (parsed.data?.partial_output as string) ?? null
     finalError.value =
-      (parsed.data?.error_message as string) ?? stopReason ?? 'Run 执行失败'
+      (parsed.data?.error_message as string) ?? stopReason ?? '执行失败'
     runStatus.value = stopReason === 'CANCELLED' ? 'cancelled' : 'failed'
     closeStream()
     if (currentRunId.value) void refreshRun(currentRunId.value)
@@ -310,7 +310,7 @@ async function send() {
   } catch (e) {
     running.value = false
     runStatus.value = null
-    error.value = errorMessage(e, '创建 Run 失败')
+    error.value = errorMessage(e, '创建任务失败')
     input.value = sent
   }
 }
@@ -368,13 +368,6 @@ onUnmounted(() => {
           <button class="btn btn-sm" type="button" @click="traceOpen = !traceOpen">
             {{ traceOpen ? '收起执行过程' : '执行过程' }}
           </button>
-          <router-link
-            v-if="selectedAgent"
-            :to="`/agents/${selectedAgent.id}`"
-            class="btn btn-sm edit-link"
-          >
-            编辑 Agent
-          </router-link>
         </div>
       </header>
 
@@ -383,22 +376,9 @@ onUnmounted(() => {
         <div class="hero">
           <h1>想让 Agent 做什么？</h1>
 
-          <div v-if="agents.length" class="available">
-            <span class="available-label">可用 Agents</span>
-            <button
-              v-for="agent in agents.slice(0, 6)"
-              :key="agent.id"
-              class="agent-chip"
-              :class="{ active: agent.id === agentId }"
-              type="button"
-              @click="onAgentChange(agent.id)"
-            >
-              {{ agent.name }}
-            </button>
-          </div>
-          <p v-else class="hero-empty">
+          <p v-if="!agents.length" class="hero-empty">
             还没有 Agent，先
-            <router-link to="/agents/new">创建一个</router-link>
+            <router-link to="/agents/new">新建一个</router-link>
             再开始对话
           </p>
         </div>
@@ -589,38 +569,6 @@ onUnmounted(() => {
   font-size: 24px;
   font-weight: 600;
   letter-spacing: 0.2px;
-}
-
-.available {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 22px;
-}
-
-.available-label {
-  font-size: 11.5px;
-  color: var(--text-muted);
-}
-
-.agent-chip {
-  padding: 3px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.agent-chip:hover,
-.agent-chip.active {
-  border-color: var(--accent);
-  color: var(--text-main);
-  background: var(--accent-soft);
 }
 
 .hero-empty {
@@ -822,10 +770,6 @@ onUnmounted(() => {
 
   .hero h1 {
     font-size: 20px;
-  }
-
-  .head-actions .edit-link {
-    display: none;
   }
 }
 </style>

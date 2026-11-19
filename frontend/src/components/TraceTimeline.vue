@@ -6,17 +6,17 @@ defineProps<{
 }>()
 
 const LABELS: Record<string, string> = {
-  RUN_STARTED: 'Run 开始',
+  RUN_STARTED: '任务开始',
   TOOL_CANDIDATES: '工具筛选',
   SKILL_INJECTED: 'Skill 注入',
   SKILL_TOOL_MISSING: 'Skill 工具缺失',
-  LLM_STARTED: 'LLM 调用',
-  LLM_FINISHED: 'LLM 完成',
+  LLM_STARTED: '模型调用',
+  LLM_FINISHED: '模型完成',
   TOOL_CALL_STARTED: '工具调用',
   TOOL_CALL_FINISHED: '工具完成',
   STATE_UPDATED: '状态更新',
-  RUN_FINISHED: 'Run 完成',
-  RUN_FAILED: 'Run 失败',
+  RUN_FINISHED: '任务完成',
+  RUN_FAILED: '任务失败',
 }
 
 function eventLabel(eventType: string): string {
@@ -90,7 +90,7 @@ function jsonText(data: Record<string, unknown> | null): string {
         <div class="head">
           <span class="label">{{ eventLabel(event.event_type) }}</span>
           <span class="meta">
-            step {{ event.step_no }}
+            步骤 {{ event.step_no }}
             <template v-if="event.node">· {{ event.node }}</template>
             <template v-if="event.tool">· <code>{{ event.tool }}</code></template>
             <template v-if="fmtDuration(event.duration_ms)">· {{ fmtDuration(event.duration_ms) }}</template>
@@ -99,9 +99,7 @@ function jsonText(data: Record<string, unknown> | null): string {
         </div>
 
         <div v-if="event.event_type === 'TOOL_CANDIDATES' && event.data" class="summary-line">
-          <span class="muted">
-            策略 {{ text(event.data.strategy, 'none') }} · K={{ text(event.data.top_k, '-') }}
-          </span>
+          <span class="muted">候选工具</span>
           <span v-for="candidate in candidateRows(event.data)" :key="candidate.name" class="chip">
             <code>{{ candidate.name }}</code>
             <em v-if="candidate.score != null">{{ candidate.score.toFixed(2) }}</em>
@@ -136,7 +134,7 @@ function jsonText(data: Record<string, unknown> | null): string {
         </div>
 
         <details v-if="event.data" class="detail">
-          <summary>查看数据</summary>
+          <summary>查看明细</summary>
           <pre>{{ jsonText(event.data) }}</pre>
         </details>
       </div>

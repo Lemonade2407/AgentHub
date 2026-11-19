@@ -156,7 +156,7 @@ watch(query, () => {
             ref="inputRef"
             v-model="query"
             type="text"
-            placeholder="搜索 Agent、Skill、工具或页面…"
+            placeholder="搜索 Agent / Skill / 工具 / 页面…"
             @keydown="onKeydown"
           />
           <kbd>ESC</kbd>

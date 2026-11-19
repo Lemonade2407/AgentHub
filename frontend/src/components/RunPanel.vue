@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { api, errorMessage, formatDuration } from '../api/http'
 import TraceTimeline from './TraceTimeline.vue'
 import type { RunRead, TraceEvent } from '../types/api'
@@ -7,10 +7,15 @@ import type { RunRead, TraceEvent } from '../types/api'
 const props = defineProps<{
   agentId: number
   agentName?: string
+  defaultSteps?: number | null
 }>()
 
 const input = ref('')
 const maxSteps = ref<number | null>(null)
+// 留空不是“无限制”，而是使用该 Agent 配置的 max_steps
+const stepsPlaceholder = computed(() =>
+  props.defaultSteps ? `默认 ${props.defaultSteps}` : '跟随 Agent',
+)
 const running = ref(false)
 const runInfo = ref<RunRead | null>(null)
 const events = ref<TraceEvent[]>([])
@@ -52,7 +57,7 @@ function handleEvent(raw: MessageEvent) {
   } else if (parsed.event_type === 'RUN_FAILED') {
     const stopReason = (parsed.data?.stop_reason as string) ?? ''
     finalOutput.value = (parsed.data?.partial_output as string) ?? null
-    finalError.value = (parsed.data?.error_message as string) ?? stopReason ?? 'Run 执行失败'
+    finalError.value = (parsed.data?.error_message as string) ?? stopReason ?? '执行失败'
     runStatus.value = stopReason === 'CANCELLED' ? 'cancelled' : 'failed'
     closeStream()
   }
@@ -99,7 +104,7 @@ async function startRun() {
   } catch (e) {
     running.value = false
     runStatus.value = null
-    error.value = errorMessage(e, '创建 Run 失败')
+    error.value = errorMessage(e, '创建任务失败')
   }
 }
 
@@ -126,14 +131,14 @@ onUnmounted(closeStream)
           v-model="input"
           rows="4"
           maxlength="8000"
-          placeholder="例如：查一下仓库最近 3 个 issue，并按优先级总结"
+          placeholder="描述任务，例如：查一下仓库最近 3 个 issue，并按优先级总结"
         ></textarea>
       </label>
 
       <div class="run-row">
         <label class="steps">
           最大执行步数
-          <input v-model.number="maxSteps" type="number" min="1" max="20" placeholder="使用 Agent 配置" />
+          <input v-model.number="maxSteps" type="number" min="1" max="20" :placeholder="stepsPlaceholder" />
         </label>
         <button class="btn-primary" type="button" :disabled="running" @click="startRun">
           {{ running ? '运行中…' : '运行' }}
@@ -142,7 +147,7 @@ onUnmounted(closeStream)
 
       <p v-if="error" class="error">{{ error }}</p>
       <p v-if="runInfo" class="muted run-id">
-        run <code>{{ runInfo.id }}</code> · {{ agentName ?? `Agent #${agentId}` }}
+        任务 <code>{{ runInfo.id }}</code> · {{ agentName ?? `Agent #${agentId}` }}
       </p>
     </div>
 
@@ -150,7 +155,7 @@ onUnmounted(closeStream)
       <div class="result-head">
         <span class="badge" :class="runStatus">{{ statusText() }}</span>
         <span v-if="runInfo" class="muted">
-          {{ runInfo.llm_calls }} 次 LLM · {{ runInfo.tool_calls }} 次工具 ·
+          {{ runInfo.llm_calls }} 次模型调用 · {{ runInfo.tool_calls }} 次工具 ·
           {{ formatDuration(runInfo.duration_ms) }}
         </span>
       </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { api, isRouteMissing } from '../api/http'
 import type { ModelApiOption } from '../types/api'
 
@@ -21,10 +21,41 @@ const emit = defineEmits<{
 const FALLBACK_MODELS = ['deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'qwen/qwen-plus']
 
 const root = ref<HTMLElement | null>(null)
+const trigger = ref<HTMLButtonElement | null>(null)
+const menuEl = ref<HTMLElement | null>(null)
+const menuStyle = ref<Record<string, string>>({})
+const listStyle = ref<Record<string, string>>({})
 const open = ref(false)
 const options = ref<Option[]>([])
 const loaded = ref(false)
 const unavailable = ref(false)
+
+const MENU_WIDTH = 300
+const MENU_MARGIN = 8
+const MENU_GAP = 6
+
+// 菜单挂到 body 上并使用 fixed 定位，避免被页面容器裁剪
+function positionMenu() {
+  const el = trigger.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  const spaceBelow = window.innerHeight - rect.bottom - MENU_GAP - MENU_MARGIN
+  const spaceAbove = rect.top - MENU_GAP - MENU_MARGIN
+  const dropUp = spaceBelow < 200 && spaceAbove > spaceBelow
+  const maxHeight = Math.max(160, Math.min(340, dropUp ? spaceAbove : spaceBelow))
+  const left = Math.max(
+    MENU_MARGIN,
+    Math.min(rect.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - MENU_MARGIN),
+  )
+  menuStyle.value = {
+    left: `${left}px`,
+    maxHeight: `${maxHeight}px`,
+    ...(dropUp
+      ? { bottom: `${window.innerHeight - rect.top + MENU_GAP}px` }
+      : { top: `${rect.bottom + MENU_GAP}px` }),
+  }
+  listStyle.value = { maxHeight: `${Math.max(80, maxHeight - 66)}px` }
+}
 
 const currentLabel = computed(() => {
   const match = options.value.find((option) => option.value === props.modelValue)
@@ -79,12 +110,16 @@ async function load() {
 }
 
 function onDocumentClick(event: MouseEvent) {
-  if (root.value && !root.value.contains(event.target as Node)) close()
+  const target = event.target as Node
+  if (root.value?.contains(target) || menuEl.value?.contains(target)) return
+  close()
 }
 
 function close() {
   open.value = false
   document.removeEventListener('click', onDocumentClick)
+  window.removeEventListener('resize', positionMenu)
+  window.removeEventListener('scroll', positionMenu, true)
 }
 
 function toggle() {
@@ -95,6 +130,9 @@ function toggle() {
   }
   open.value = true
   document.addEventListener('click', onDocumentClick)
+  window.addEventListener('resize', positionMenu)
+  window.addEventListener('scroll', positionMenu, true)
+  void nextTick(positionMenu)
 }
 
 function choose(option: Option) {
@@ -103,12 +141,13 @@ function choose(option: Option) {
 }
 
 onMounted(load)
-onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
+onBeforeUnmount(close)
 </script>
 
 <template>
   <div ref="root" class="model-picker">
     <button
+      ref="trigger"
       class="model-trigger"
       type="button"
       :disabled="disabled"
@@ -120,31 +159,33 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
     </button>
 
-    <div v-if="open" class="model-menu">
-      <p v-if="unavailable" class="model-note">
-        模型 API 接口未就绪，当前使用 Agent 的 provider/model 字符串。
-      </p>
-      <div class="model-list">
-        <template v-for="entry in groups" :key="entry.group">
-          <p class="model-group">{{ entry.group }}</p>
-          <button
-            v-for="option in entry.items"
-            :key="option.value"
-            class="model-option"
-            :class="{ active: option.value === modelValue }"
-            type="button"
-            @click="choose(option)"
-          >
-            <span class="model-option-label">{{ option.label }}</span>
-            <span class="model-option-key">{{ option.value }}</span>
-          </button>
-        </template>
-        <p v-if="!loaded" class="model-note">加载中…</p>
+    <Teleport to="body">
+      <div v-if="open" ref="menuEl" class="model-menu" :style="menuStyle">
+        <p v-if="unavailable" class="model-note">
+          暂未获取到模型列表，可直接填写模型标识。
+        </p>
+        <div class="model-list" :style="listStyle">
+          <template v-for="entry in groups" :key="entry.group">
+            <p class="model-group">{{ entry.group }}</p>
+            <button
+              v-for="option in entry.items"
+              :key="option.value"
+              class="model-option"
+              :class="{ active: option.value === modelValue }"
+              type="button"
+              @click="choose(option)"
+            >
+              <span class="model-option-label">{{ option.label }}</span>
+              <span class="model-option-key">{{ option.value }}</span>
+            </button>
+          </template>
+          <p v-if="!loaded" class="model-note">加载中…</p>
+        </div>
+        <router-link to="/settings/models" class="model-foot" @click="close">
+          管理模型 API
+        </router-link>
       </div>
-      <router-link to="/settings/models" class="model-foot" @click="close">
-        管理模型 API
-      </router-link>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -192,11 +233,12 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
 }
 
 .model-menu {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  z-index: 30;
+  position: fixed;
+  z-index: 200;
   width: 300px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 6px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
@@ -212,7 +254,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
 }
 
 .model-list {
-  max-height: 280px;
+  min-height: 0;
   overflow-y: auto;
 }
 

@@ -173,8 +173,8 @@ onMounted(load)
     </div>
 
     <div v-if="demoMode" class="demo-banner">
-      <span class="demo-badge">演示数据</span>
-      后端 Agent Center 列表接口（D：WP-3.1）尚未就绪，当前展示演示卡片。
+      <span class="demo-badge">示例数据</span>
+      广场内容暂时无法加载，当前展示示例数据。
     </div>
 
     <p v-if="error" class="error-box">{{ error }}</p>
@@ -229,7 +229,7 @@ onMounted(load)
 
     <div v-if="!loading && total > 0" class="pager">
       <button class="btn btn-sm" type="button" :disabled="page <= 1" @click="goPage(page - 1)">上一页</button>
-      <span class="muted">第 {{ page }} / {{ totalPages }} 页 · 共 {{ total }} 个</span>
+      <span class="muted">第 {{ page }} / {{ totalPages }} 页 · 共 {{ total }} 条</span>
       <button class="btn btn-sm" type="button" :disabled="page >= totalPages" @click="goPage(page + 1)">
         下一页
       </button>
@@ -257,10 +257,6 @@ onMounted(load)
   background: rgba(210, 153, 34, 0.2);
   font-size: 11px;
   line-height: 19px;
-}
-
-.grid {
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
 }
 
 .pub-card {

@@ -30,7 +30,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   try {
     resp = await fetch(path, { ...init, headers })
   } catch {
-    throw new ApiError('无法连接后端服务，请确认 FastAPI 已启动', 0, 'NETWORK_ERROR')
+    throw new ApiError('无法连接到服务，请检查网络后重试', 0, 'NETWORK_ERROR')
   }
 
   let body: unknown = null
@@ -46,9 +46,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   if (!resp.ok) {
     const err = (body && typeof body === 'object' ? body : {}) as ErrorBody
     const fallback =
-      resp.status >= 500
-        ? '后端服务不可用，请确认 FastAPI 已启动（端口 8001）'
-        : `HTTP ${resp.status}`
+      resp.status >= 500 ? '服务暂时不可用，请稍后重试' : `HTTP ${resp.status}`
     const textBody = typeof body === 'string' ? body.trim() : ''
     const message =
       typeof err.message === 'string'

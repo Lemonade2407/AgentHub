@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { riskLevelLabel } from '../types/skill'
 
 // DTO 与 AgentHub_接口契约文档.md §3.2 / §3.3 / §4.2 一致（snake_case）
 interface McpServer {
@@ -255,7 +256,7 @@ async function updateRisk(t: ToolDefinition, level: string) {
     const updated: ToolDefinition = await resp.json()
     const index = tools.value.findIndex((item) => item.id === t.id)
     if (index >= 0) tools.value[index] = updated
-    successMsg.value = `已将 ${t.qualified_name} 的风险等级改为 ${updated.risk_level}`
+    successMsg.value = `已将 ${t.qualified_name} 的风险等级改为 ${riskLevelLabel(updated.risk_level)}`
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
     await loadTools() // 失败时重新拉取，回滚下拉框显示
@@ -278,88 +279,78 @@ onMounted(() => {
 
 <template>
   <section class="page">
-    <div class="header">
-      <h1>MCP Center</h1>
+    <header class="page-header">
+      <h1 class="page-title">MCP Hub</h1>
       <button class="btn-primary" @click="openCreate">注册 Server</button>
-    </div>
+    </header>
 
     <p v-if="error" class="error">{{ error }}</p>
     <p v-if="successMsg" class="ok">{{ successMsg }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
-    <table v-if="!loading && servers.length" class="table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>名称</th>
-          <th>Endpoint</th>
-          <th>传输</th>
-          <th>状态</th>
-          <th>工具数</th>
-          <th>启用</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="s in servers" :key="s.id">
-          <td>{{ s.id }}</td>
-          <td>{{ s.name }}</td>
-          <td><code>{{ s.endpoint }}</code></td>
-          <td>{{ s.transport }}</td>
-          <td>
-            <span class="badge" :class="statusClass(s.status)">{{ s.status }}</span>
-          </td>
-          <td>{{ s.tool_count }}</td>
-          <td>{{ s.enabled ? '是' : '否' }}</td>
-          <td class="ops">
-            <button class="btn" :disabled="busyServer === s.id" @click="testServer(s)">
-              {{ busyServer === s.id ? '…' : '测试' }}
+    <div v-if="!loading && servers.length" class="grid">
+      <article v-for="s in servers" :key="s.id" class="mcp-card">
+        <div class="card-head">
+          <div class="title-block">
+            <h3>{{ s.name }}</h3>
+            <code class="endpoint">{{ s.endpoint }}</code>
+          </div>
+          <span class="badge" :class="statusClass(s.status)">{{ s.status }}</span>
+        </div>
+
+        <div class="facts">
+          <span>{{ s.transport }}</span>
+          <span>{{ s.tool_count }} 工具</span>
+          <span>{{ s.enabled ? '启用' : '停用' }}</span>
+        </div>
+
+        <div class="card-foot">
+          <span class="muted">#{{ s.id }}</span>
+          <div class="ops">
+            <button class="btn btn-sm" :disabled="busyServer === s.id" @click="testServer(s)">
+              {{ busyServer === s.id ? '测试中…' : '测试连接' }}
             </button>
-            <button class="btn" :disabled="busyServer === s.id" @click="discover(s)">发现工具</button>
-            <button class="btn" @click="openEdit(s)">编辑</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    <p v-else-if="!loading" class="muted">暂无 Server，点击"注册 Server"添加。</p>
+            <button class="btn btn-sm" :disabled="busyServer === s.id" @click="discover(s)">
+              发现工具
+            </button>
+            <button class="btn btn-sm" @click="openEdit(s)">编辑</button>
+          </div>
+        </div>
+      </article>
+    </div>
+    <p v-else-if="!loading" class="muted">还没有 Server，点击右上角「注册 Server」添加。</p>
 
     <h2 class="sub-title">已发现的工具（{{ tools.length }}）</h2>
     <p v-if="toolsLoading" class="muted">加载中…</p>
-    <table v-if="!toolsLoading && tools.length" class="table">
-      <thead>
-        <tr>
-          <th>工具名</th>
-          <th>Server</th>
-          <th>风险级别</th>
-          <th>描述</th>
-          <th>测试</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="t in tools" :key="t.id">
-          <td><code>{{ t.qualified_name }}</code></td>
-          <td>{{ t.server_name }}</td>
-          <td class="risk-cell">
-            <span class="risk" :class="t.risk_level.toLowerCase()">{{ t.risk_level }}</span>
-            <select
-              class="risk-select"
-              :value="t.risk_level"
-              :disabled="busyTool === t.id"
-              title="人工覆盖风险等级"
-              @change="updateRisk(t, ($event.target as HTMLSelectElement).value)"
-            >
-              <option v-for="level in RISK_LEVELS" :key="level" :value="level">{{ level }}</option>
-            </select>
-          </td>
-          <td class="desc">{{ t.description }}</td>
-          <td>
-            <button class="btn" :disabled="busyTool === t.id" @click="testTool(t)">测试</button>
-            <span v-if="toolResults[t.id]" class="muted test-result">{{ toolResults[t.id] }}</span>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-    <p v-else-if="!toolsLoading" class="muted">暂无工具，对 Server 执行"发现工具"即可入库。</p>
+    <div v-if="!toolsLoading && tools.length" class="grid">
+      <article v-for="t in tools" :key="t.id" class="tool-card">
+        <div class="card-head">
+          <code class="tool-name">{{ t.qualified_name }}</code>
+          <span class="risk" :class="t.risk_level.toLowerCase()">{{ riskLevelLabel(t.risk_level) }}</span>
+        </div>
+
+        <p class="desc">{{ t.description || '暂无描述' }}</p>
+
+        <div class="facts">
+          <span>{{ t.server_name }}</span>
+          <select
+            class="risk-select"
+            :value="t.risk_level"
+            :disabled="busyTool === t.id"
+            title="人工覆盖风险等级"
+            @change="updateRisk(t, ($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="level in RISK_LEVELS" :key="level" :value="level">{{ riskLevelLabel(level) }}</option>
+          </select>
+        </div>
+
+        <div class="card-foot">
+          <span class="muted test-result">{{ toolResults[t.id] || '' }}</span>
+          <button class="btn btn-sm" :disabled="busyTool === t.id" @click="testTool(t)">测试</button>
+        </div>
+      </article>
+    </div>
+    <p v-else-if="!toolsLoading" class="muted">还没有工具，对 Server 执行「发现工具」即可添加。</p>
 
     <!-- 新建 / 编辑 弹窗 -->
     <div v-if="showForm" class="overlay" @click.self="showForm = false">
@@ -373,14 +364,14 @@ onMounted(() => {
 
         <div class="row">
           <label>Endpoint</label>
-          <input v-model="form.endpoint" type="text" maxlength="512" placeholder="http://demo-mcp:8100/mcp" required />
+          <input v-model="form.endpoint" type="text" maxlength="512" placeholder="例如：https://example.com/mcp" required />
         </div>
 
         <div class="row">
-          <label>传输方式（V1 仅支持 Streamable HTTP）</label>
+          <label>传输方式（当前仅支持 Streamable HTTP）</label>
           <select v-model="form.transport">
             <option value="streamable_http">streamable_http</option>
-            <option value="stdio" disabled title="P2 再支持">stdio（暂不支持）</option>
+            <option value="stdio" disabled>stdio（暂不支持）</option>
           </select>
         </div>
 
@@ -406,50 +397,103 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
 .sub-title {
   font-size: 16px;
   margin: 24px 0 8px;
 }
 
-.table {
-  width: 100%;
-  border-collapse: collapse;
+.mcp-card,
+.tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   background: var(--bg-panel);
   border: 1px solid var(--border-color);
-  border-radius: 8px;
-  overflow: hidden;
+  border-radius: var(--radius-md);
+  padding: 16px;
+  transition: border-color 0.15s ease;
 }
 
-.table th,
-.table td {
-  padding: 10px 12px;
-  text-align: left;
-  border-bottom: 1px solid var(--border-color);
+.mcp-card:hover,
+.tool-card:hover {
+  border-color: var(--border-strong);
+}
+
+.card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.title-block {
+  min-width: 0;
+}
+
+.title-block h3 {
+  margin: 0;
   font-size: 14px;
-}
-
-.table th {
-  background: var(--surface-muted);
   font-weight: 600;
-  color: var(--text-muted);
+  word-break: break-word;
 }
 
-.desc {
-  max-width: 320px;
-  color: var(--text-muted);
-  font-size: 13px;
+.endpoint {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-name {
+  font-size: 12px;
+  color: var(--text-main);
+  word-break: break-all;
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+
+.card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.tool-card .desc {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: 38px;
+}
+
+.test-result {
+  font-size: 11px;
 }
 
 .ops {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .badge {
@@ -471,13 +515,6 @@ onMounted(() => {
 .badge.unknown {
   background: var(--bg-elevated);
   color: var(--text-muted);
-}
-
-.risk-cell {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
 }
 
 .risk-select {

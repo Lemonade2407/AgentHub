@@ -52,15 +52,15 @@ function demoPrecheck(): PrecheckResult {
       version: skill.version,
       params: skill.params ?? {},
       required: true,
-      reason: '演示数据：本地与公开广场均未找到匹配 Skill',
+      reason: '本地与公开广场均未找到匹配 Skill',
     })),
     missing_tools: (snapshot.tools ?? []).map((tool) => ({
       server_name: tool.server_name,
       remote_name: tool.remote_name,
       required: tool.required ?? true,
-      reason: '演示数据：本地未注册同名 MCP Server',
+      reason: '本地未注册同名 MCP Server',
     })),
-    warnings: ['演示数据：后端接口就绪后可执行真实预检与安装'],
+    warnings: ['当前为示例数据，无法执行安装。'],
     suggested_model: snapshot.suggested_model ?? null,
   }
 }
@@ -92,7 +92,7 @@ async function load() {
 
 async function install(confirmMissing: boolean) {
   if (!precheck.value || demoFallback.value) {
-    error.value = '演示数据无法安装，请等待 D 的 Agent Center 接口就绪'
+    error.value = '示例数据无法安装'
     return
   }
   installing.value = true
@@ -133,7 +133,7 @@ onMounted(load)
 
       <p v-if="loading" class="muted">预检中…</p>
       <p v-if="error" class="error-box">{{ error }}</p>
-      <p v-if="demoFallback" class="demo-hint">演示数据：以下缺失清单用于界面走查。</p>
+      <p v-if="demoFallback" class="demo-hint">以下为示例缺失清单。</p>
 
       <template v-if="precheck && !loading">
         <div class="summary-row">
@@ -163,7 +163,7 @@ onMounted(load)
               <p class="reason">{{ item.reason }}</p>
             </li>
           </ul>
-          <router-link to="/skills" class="link">去 Skills Center 安装或创建</router-link>
+          <router-link to="/skills" class="link">去 Skills Center 安装或新建</router-link>
         </section>
 
         <section v-if="precheck.missing_tools.length" class="block">
@@ -204,7 +204,7 @@ onMounted(load)
         </section>
 
         <p v-if="precheck.already_installed" class="muted">
-          你已经安装过该 Publication，可直接打开副本继续编辑。
+          你已经安装过该 Agent，可直接打开副本继续编辑。
         </p>
       </template>
 

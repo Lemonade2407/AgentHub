@@ -59,11 +59,6 @@ const groups: NavGroup[] = [
         path: '/settings/models',
         icon: 'M15 7a4 4 0 1 1-2.6 7L4 21H3v-3l8.5-8.5A4 4 0 0 1 15 7Z',
       },
-      {
-        label: '账号',
-        path: '/settings/profile',
-        icon: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM4 21a8 8 0 0 1 16 0',
-      },
     ],
   },
 ]
@@ -166,7 +161,6 @@ function remove(runId: string) {
     <div class="sidebar-foot">
       <span class="mode-dot"></span>
       <span>本地模式</span>
-      <router-link to="/settings/profile" class="foot-link" @click="closeSidebar">账号</router-link>
     </div>
   </aside>
 </template>
@@ -425,16 +419,6 @@ function remove(runId: string) {
   height: 6px;
   border-radius: 50%;
   background: var(--success);
-}
-
-.foot-link {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.foot-link:hover {
-  color: var(--text-main);
 }
 
 @media (max-width: 1024px) {

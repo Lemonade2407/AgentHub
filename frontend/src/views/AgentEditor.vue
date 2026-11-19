@@ -8,6 +8,7 @@ import RunPanel from '../components/RunPanel.vue'
 import { DOCUMENT_ACCEPT, extractDocumentText } from '../utils/document-text'
 import type { Agent } from '../types/api'
 import {
+  riskLevelLabel,
   statusLabel,
   type AgentSkill,
   type Page,
@@ -288,7 +289,7 @@ async function save() {
         enabled: form.value.enabled,
         tool_ids: form.value.tool_ids,
       })
-      successMsg.value = `创建成功 #${created.id}`
+      successMsg.value = '新建成功'
       await router.replace(`/agents/${created.id}`)
       await loadAgentSkills()
     } else {
@@ -334,12 +335,12 @@ onMounted(() => {
     <header class="page-header">
       <div>
         <h1 class="page-title">
-          {{ isEdit ? `编辑 Agent #${rawId}` : '新建 Agent' }}
+          {{ isEdit ? form.name || '编辑 Agent' : '新建 Agent' }}
         </h1>
       </div>
       <div class="head-actions">
         <router-link to="/agents" class="btn">返回列表</router-link>
-        <router-link v-if="isEdit" :to="`/chat?agent=${rawId}`" class="btn">去运行</router-link>
+        <router-link v-if="isEdit" :to="`/chat?agent=${rawId}`" class="btn">运行</router-link>
         <button v-if="isEdit" class="btn" type="button" @click="publishOpen = true">发布</button>
         <button class="btn-primary" type="button" :disabled="saving" @click="save">
           {{ saving ? '保存中…' : '保存' }}
@@ -403,14 +404,14 @@ onMounted(() => {
         <label class="row">
           <span>最大执行步数</span>
           <input v-model.number="form.max_steps" type="number" min="1" max="20" />
-          <small class="muted">1 ~ 20，默认 8；达到上限会提前结束并返回部分结果</small>
+          <small class="field-hint">1 ~ 20，默认 8；达到上限会提前结束并返回部分结果</small>
         </label>
 
         <div class="row enable-block">
           <label class="switch-row">
             <span>启用 Agent</span>
             <input v-model="form.enabled" type="checkbox" />
-            <small class="muted">停用后不能发起新的 Run，配置和历史记录保留</small>
+            <small class="field-hint">停用后不能发起新任务，配置和历史记录保留</small>
           </label>
         </div>
       </div>
@@ -419,22 +420,10 @@ onMounted(() => {
       <div v-show="activeTab === 'model'" class="panel-body">
         <div class="row">
           <div class="row-head">
-            <span>模型标识（provider/model）</span>
+            <span>模型标识</span>
             <ModelSelector :model-value="form.model" @update:model-value="form.model = $event" />
           </div>
-          <input v-model="form.model" type="text" maxlength="128" required />
-          <small class="muted">
-            选择模型 API 下的模型会自动写入该字段；后端 WP-1.5 落地后将优先使用
-            <code>model_api_id + model_key</code>，此处作为兼容回退。
-          </small>
-        </div>
-
-        <div class="hint-card">
-          <p class="block-title">为什么这里只有 temperature？</p>
-          <p class="muted">
-            V2 只保留 temperature（0~2）作为可调参数，其余高级参数进入 V3。当前后端的 Agent
-            DTO 尚未包含该字段，界面先保持只读说明，避免保存时被静默丢弃。
-          </p>
+          <input v-model="form.model" type="text" maxlength="128" placeholder="例如：deepseek/deepseek-chat" required />
         </div>
 
         <router-link to="/settings/models" class="btn">管理模型 API</router-link>
@@ -445,8 +434,11 @@ onMounted(() => {
         <p v-if="!isEdit" class="muted">保存 Agent 后可挂载 Skill。</p>
         <template v-else>
           <div class="skill-add">
-            <select v-model.number="newSkillId">
-              <option :value="null">选择要挂载的 Skill</option>
+            <select
+              v-model.number="newSkillId"
+              :class="{ placeholder: newSkillId == null }"
+            >
+              <option :value="null" disabled hidden>选择要挂载的 Skill</option>
               <option v-for="skill in selectableSkills" :key="skill.id" :value="skill.id">
                 {{ skill.name }} · v{{ skill.version }}
               </option>
@@ -503,13 +495,11 @@ onMounted(() => {
 
               <label class="params">
                 <span>参数覆盖（JSON，覆盖 Skill 默认值）</span>
-                <input v-model="skill.params_text" type="text" placeholder='{"tone":"正式"}' />
+                <input v-model="skill.params_text" type="text" placeholder='例如：{"tone":"正式"}' />
               </label>
             </div>
           </div>
-          <p v-else-if="!skillsLoading" class="muted">
-            尚未挂载 Skill。Skill 指令会按顺序追加到 System Prompt，工具自动进入候选池。
-          </p>
+          <p v-else-if="!skillsLoading" class="muted">尚未挂载 Skill。</p>
 
           <div class="skill-actions">
             <button class="btn-primary" type="button" :disabled="skillsSaving" @click="saveSkills">
@@ -522,9 +512,6 @@ onMounted(() => {
 
       <!-- 工具 -->
       <div v-show="activeTab === 'tools'" class="panel-body">
-        <p class="muted tool-note">
-          显式绑定的工具与 Skill 带来的工具会合并为候选池（Top-K 不变）。来自 Skill 的工具以只读标签展示。
-        </p>
         <div v-if="tools.length" class="tool-list">
           <label v-for="tool in tools" :key="tool.id" class="tool-item">
             <input
@@ -535,21 +522,21 @@ onMounted(() => {
             />
             <span class="tool-name">
               <code>{{ tool.qualified_name }}</code>
-              <span class="risk" :class="tool.risk_level.toLowerCase()">{{ tool.risk_level }}</span>
+              <span class="risk" :class="tool.risk_level.toLowerCase()">{{ riskLevelLabel(tool.risk_level) }}</span>
             </span>
             <span class="muted desc">{{ tool.description }}</span>
             <span v-if="skillContributedTools.has(tool.qualified_name)" class="skill-source">
-              来自 Skill「{{ skillContributedTools.get(tool.qualified_name) }}」，自动进入候选池
+              来自 Skill「{{ skillContributedTools.get(tool.qualified_name) }}」，自动加入可选工具
             </span>
           </label>
         </div>
-        <p v-else class="muted">暂无可用工具，请先在 MCP Hub 完成 Server 发现。</p>
+        <p v-else class="muted">还没有工具，请先在 MCP Hub 注册 Server 并发现工具。</p>
       </div>
 
       <!-- 调试 -->
       <div v-show="activeTab === 'debug'" class="panel-body">
         <template v-if="isEdit">
-          <RunPanel :agent-id="agentId" :agent-name="form.name" />
+          <RunPanel :agent-id="agentId" :agent-name="form.name" :default-steps="form.max_steps" />
         </template>
         <p v-else class="muted">保存 Agent 后可在此直接调试运行。</p>
       </div>
@@ -619,10 +606,6 @@ onMounted(() => {
   color: var(--text-secondary);
 }
 
-.row small {
-  font-size: 11.5px;
-}
-
 .row.two {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -652,28 +635,13 @@ onMounted(() => {
   color: var(--text-secondary);
 }
 
-.block-title {
-  margin: 0 0 2px;
-  font-size: 12.5px;
-  font-weight: 600;
+.switch-row .field-hint {
+  flex-basis: 100%;
 }
 
 .mono {
   font-family: var(--font-mono);
   font-size: 12px;
-}
-
-.hint-card {
-  padding: 12px 14px;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-}
-
-.hint-card p:last-child {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .skill-add {
@@ -685,6 +653,10 @@ onMounted(() => {
 
 .skill-add select {
   min-width: 240px;
+}
+
+.skill-add select.placeholder {
+  color: var(--text-muted);
 }
 
 .skill-list {
@@ -760,11 +732,6 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-.tool-note {
-  margin: 0;
-  font-size: 12px;
 }
 
 .tool-list {

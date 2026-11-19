@@ -83,7 +83,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
           <span class="option-name">{{ agent.name }}</span>
           <span class="option-hint">{{ agent.model }}</span>
         </button>
-        <p v-if="!filtered.length" class="picker-empty">暂无 Agent</p>
+        <p v-if="!filtered.length" class="picker-empty">还没有 Agent</p>
       </div>
       <router-link to="/agents/new" class="picker-foot" @click="close">+ 新建 Agent</router-link>
     </div>

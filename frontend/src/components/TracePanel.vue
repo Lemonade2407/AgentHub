@@ -16,7 +16,7 @@ defineEmits<{
 
 const STATUS_TEXT: Record<string, string> = {
   PENDING: '等待执行',
-  RUNNING: '执行中',
+  RUNNING: '运行中',
   SUCCESS: '成功',
   PARTIAL: '部分完成',
   FAILED: '失败',
@@ -32,7 +32,7 @@ const statusText = computed(() => (status.value ? (STATUS_TEXT[status.value] ?? 
     <header class="trace-head">
       <div>
         <h3>执行过程</h3>
-        <p>SSE 实时事件 · 可展开查看原始数据</p>
+        <p>实时事件 · 可展开查看原始数据</p>
       </div>
       <button class="trace-close" type="button" aria-label="收起执行过程" @click="$emit('close')">
         <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>

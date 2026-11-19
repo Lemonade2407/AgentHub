@@ -39,8 +39,8 @@ const stepsPlaceholder = computed(() =>
 
 const stepsTitle = computed(() =>
   selectedAgent.value
-    ? `留空则使用「${selectedAgent.value.name}」配置的 ${selectedAgent.value.max_steps} 步上限（1~20）`
-    : '留空则使用所选 Agent 配置的步数上限（1~20）',
+    ? `留空则使用「${selectedAgent.value.name}」配置的最大执行步数 ${selectedAgent.value.max_steps}（1~20）`
+    : '留空则使用所选 Agent 配置的最大执行步数（1~20）',
 )
 
 function resize() {
@@ -95,7 +95,7 @@ defineExpose({ focus })
         @update:model-value="onModelSelect"
       />
       <label class="steps" :title="stepsTitle">
-        <span class="steps-label">步数上限</span>
+        <span class="steps-label">最大执行步数</span>
         <input
           type="number"
           min="1"

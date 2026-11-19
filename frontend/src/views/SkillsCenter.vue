@@ -212,8 +212,8 @@ onMounted(load)
           <span>{{ categoryLabel(skill.category) }}</span>
           <span>{{ visibilityLabel(skill.visibility) }}</span>
           <span>{{ skill.tools.length }} 工具</span>
-          <span>{{ skill.install_count }} 安装</span>
-          <span v-if="tab === 'center'">by {{ skill.owner_display_name || '匿名' }}</span>
+          <span>安装 {{ skill.install_count }}</span>
+          <span v-if="tab === 'center'">作者 {{ skill.owner_display_name || '匿名' }}</span>
         </div>
 
         <div class="actions">

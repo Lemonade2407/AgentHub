@@ -285,6 +285,14 @@ input[type='checkbox'] {
   color: var(--text-secondary);
 }
 
+/* 表单字段下方的灰色提示，全站统一字号与间距 */
+.field-hint {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
 .card {
   background: var(--bg-panel);
   border: 1px solid var(--border-color);
@@ -313,8 +321,20 @@ input[type='checkbox'] {
 
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+}
+
+@media (max-width: 1100px) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .muted {

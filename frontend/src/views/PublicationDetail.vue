@@ -32,10 +32,10 @@ async function load() {
         item.value = demo
         demoMode.value = true
       } else {
-        error.value = '未找到该 Publication'
+        error.value = '未找到该发布内容'
       }
     } else {
-      error.value = errorMessage(e, 'Publication 加载失败')
+      error.value = errorMessage(e, '加载失败')
     }
   } finally {
     loading.value = false
@@ -82,8 +82,8 @@ onMounted(load)
 
     <template v-if="item">
       <div v-if="demoMode" class="demo-banner">
-        <span class="demo-badge">演示数据</span>
-        Publication 详情接口（D：WP-3.1）尚未就绪，以下为演示快照。
+        <span class="demo-badge">示例数据</span>
+        暂时无法加载发布详情，以下为示例数据。
       </div>
 
       <header class="detail-head">
@@ -104,7 +104,7 @@ onMounted(load)
             <div class="kv">
               <span>名称</span>
               <strong>{{ item.snapshot.agent.name }}</strong>
-              <span>最大步数</span>
+              <span>最大执行步数</span>
               <strong>{{ item.snapshot.agent.max_steps }}</strong>
               <span>建议模型</span>
               <strong class="mono">
