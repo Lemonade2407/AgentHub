@@ -65,7 +65,7 @@ async function loadDynamic() {
         id: `agent-${agent.id}`,
         group: 'Agents',
         label: agent.name,
-        hint: agent.model,
+        hint: agent.model || '对话时选择模型',
         to: `/agents/${agent.id}`,
       })
     }

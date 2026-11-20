@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable, Sequence
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
 from app.agent.graph import RunContext, build_graph
@@ -39,6 +39,7 @@ from app.core.enums import RunStatus, StepStatus, StopReason, TraceEventType
 from app.mcp.gateway import McpToolGateway
 from app.mcp.schemas import ToolDefinition
 from app.schemas.agent import AgentRead
+from app.schemas.run import ChatHistoryItem
 from app.tools.selector import ToolSelector
 from app.trace.events import TraceEvent, TraceSink
 
@@ -103,6 +104,7 @@ class AgentRunner:
         tracer: TraceSink,
         skills: Sequence[SkillDefinition] = (),
         model_credential: ModelCredential | None = None,
+        history: Sequence[ChatHistoryItem] = (),
     ) -> RunResult:
         started = time.perf_counter()
         policy = StopPolicy(max_steps)
@@ -209,8 +211,19 @@ class AgentRunner:
             tool_timeout_ms=self._tool_timeout_ms,
             model_meta=model_meta,
         )
+        prior_messages = []
+        for item in history:
+            content = item.content.strip()
+            if not content:
+                continue
+            prior_messages.append(
+                HumanMessage(content=content)
+                if item.role == "user"
+                else AIMessage(content=content)
+            )
+
         initial_state: AgentState = {
-            "messages": [HumanMessage(content=user_input)],
+            "messages": [*prior_messages, HumanMessage(content=user_input)],
             "candidate_tools": candidates,
             "step_count": 0,
             "run_id": run_id,

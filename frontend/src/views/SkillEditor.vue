@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { formatBytes } from '../api/http'
+import { showNotice } from '../stores/ui'
 import { DOCUMENT_ACCEPT, extractDocumentText } from '../utils/document-text'
+import type { WorkspaceFile } from '../types/api'
 import {
   SKILL_CATEGORIES,
   parametersFromSchema,
@@ -62,6 +65,77 @@ const instructionUploading = ref(false)
 const instructionMessage = ref('')
 const instructionOk = ref(true)
 const MAX_INSTRUCTIONS_LENGTH = 20000
+
+// 公共附件资源库
+const attachments = ref<WorkspaceFile[]>([])
+const attachmentInput = ref<HTMLInputElement | null>(null)
+const attachmentLoading = ref(false)
+const attachmentUploading = ref(false)
+const attachmentMessage = ref('')
+
+async function loadAttachments() {
+  if (isNew.value) {
+    attachments.value = []
+    return
+  }
+  attachmentLoading.value = true
+  try {
+    const resp = await fetch(`/api/skills/${skillId.value}/attachments`)
+    if (!resp.ok) throw new Error(await failMessage(resp))
+    attachments.value = await resp.json()
+  } catch (e) {
+    attachmentMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    attachmentLoading.value = false
+  }
+}
+
+async function onAttachmentSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length) return
+
+  attachmentUploading.value = true
+  attachmentMessage.value = ''
+  try {
+    for (const file of files) {
+      const body = new FormData()
+      body.append('file', file)
+      const resp = await fetch(`/api/skills/${skillId.value}/attachments`, {
+        method: 'POST',
+        body,
+      })
+      if (!resp.ok) throw new Error(await failMessage(resp))
+    }
+    attachmentMessage.value = `已上传 ${files.length} 个附件`
+    await loadAttachments()
+  } catch (e) {
+    attachmentMessage.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    attachmentUploading.value = false
+  }
+}
+
+async function removeAttachment(name: string) {
+  if (!window.confirm(`确定删除附件「${name}」？`)) return
+  attachmentMessage.value = ''
+  try {
+    const resp = await fetch(
+      `/api/skills/${skillId.value}/attachments/${encodeURIComponent(name)}`,
+      { method: 'DELETE' },
+    )
+    if (!resp.ok) throw new Error(await failMessage(resp))
+    attachmentMessage.value = '已删除'
+    await loadAttachments()
+  } catch (e) {
+    attachmentMessage.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function attachmentUrl(name: string): string {
+  return `/api/skills/${skillId.value}/attachments/${encodeURIComponent(name)}`
+}
 
 const parsedSchema = computed<{ value: Record<string, unknown> | null; error: string }>(() => {
   try {
@@ -268,9 +342,8 @@ async function save() {
     const saved: Skill = await resp.json()
     skill.value = saved
     owned.value = saved.owned
-    message.value = '保存成功'
-    if (isNew.value) router.replace(`/skills/${saved.id}`)
-    else await loadSkill()
+    showNotice('保存成功')
+    await router.push('/skills')
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
@@ -350,7 +423,7 @@ async function exportSkill() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadTools(), loadSkill()])
+  await Promise.all([loadTools(), loadSkill(), loadAttachments()])
 })
 </script>
 
@@ -566,6 +639,51 @@ onMounted(async () => {
               <span v-if="!item.tool.enabled" class="badge archived">不可用</span>
             </li>
           </ul>
+        </section>
+
+        <section class="preview-block">
+          <div class="attachment-head">
+            <h3>附件资源库</h3>
+            <template v-if="!isNew && owned">
+              <button
+                class="btn btn-sm"
+                type="button"
+                :disabled="attachmentUploading"
+                @click="attachmentInput?.click()"
+              >
+                {{ attachmentUploading ? '上传中…' : '上传附件' }}
+              </button>
+              <input
+                ref="attachmentInput"
+                type="file"
+                multiple
+                hidden
+                @change="onAttachmentSelected"
+              />
+            </template>
+          </div>
+          <p v-if="isNew" class="muted">保存 Skill 后可上传公共附件。</p>
+          <template v-else>
+            <p v-if="attachmentMessage" class="muted">{{ attachmentMessage }}</p>
+            <p v-if="attachmentLoading" class="muted">加载中…</p>
+            <ul v-else-if="attachments.length" class="attachment-list">
+              <li v-for="file in attachments" :key="file.name">
+                <a :href="attachmentUrl(file.name)" target="_blank" rel="noopener">
+                  {{ file.name }}
+                </a>
+                <span class="muted">{{ formatBytes(file.size) }}</span>
+                <button
+                  v-if="owned"
+                  class="link-danger"
+                  type="button"
+                  @click="removeAttachment(file.name)"
+                >
+                  删除
+                </button>
+              </li>
+            </ul>
+            <p v-else class="muted">暂无附件</p>
+          </template>
         </section>
       </aside>
     </div>
@@ -808,6 +926,59 @@ textarea.instructions-input {
 
 .selected-tools li {
   margin-bottom: 4px;
+}
+
+.attachment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.attachment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.attachment-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.attachment-list a {
+  color: var(--accent-hover);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-list a:hover {
+  text-decoration: underline;
+}
+
+.attachment-list .muted {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+.link-danger {
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  color: var(--danger);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.link-danger:hover {
+  text-decoration: underline;
 }
 
 .badge {

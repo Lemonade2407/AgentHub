@@ -32,3 +32,6 @@ Thumbs.db
 # ---- Node / 前端 ----
 node_modules/
 .vite/
+
+# ---- 用户上传的 Agent / Skill 工作区文件 ----
+workspaces/

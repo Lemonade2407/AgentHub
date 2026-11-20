@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -21,7 +22,7 @@ from app.repositories.mcp_repository import DbMcpServerProvider, McpToolReposito
 from app.repositories.run_repository import RunRepository
 from app.repositories.skill_repository import SkillRepository
 from app.schemas.agent import AgentRead
-from app.schemas.run import RunCreateRequest, RunRead
+from app.schemas.run import ChatHistoryItem, RunCreateRequest, RunRead
 from app.services.model_credential_service import ModelCredentialResolver
 from app.services.trace_service import SSEBroker, TraceService
 from app.tools.selector import TfidfToolSelector
@@ -57,8 +58,23 @@ class RunService:
         if not agent.enabled:
             raise AppError("AGENT_DISABLED", f"Agent 已禁用：{agent_id}", http_status=409)
 
-        # V2：按 Agent 引用的 Model API 解密凭据；无 V2 字段时返回 None，回落 V1。
-        model_credential = await ModelCredentialResolver(session).resolve(agent_id)
+        # V2：模型由对话窗口在运行时选择，不再强绑定在 Agent 上
+        requested_model = (request.model or "").strip() or None
+        effective_model = requested_model or (agent.model or "").strip()
+        if not effective_model:
+            raise AppError(
+                "MODEL_NOT_SELECTED",
+                "请先在对话窗口选择模型",
+                http_status=400,
+            )
+        model_credential = await ModelCredentialResolver(session).resolve(
+            agent_id, model_override=requested_model
+        )
+        agent_for_run = (
+            agent
+            if effective_model == agent.model
+            else agent.model_copy(update={"model": effective_model})
+        )
 
         tools = await McpToolRepository(session).list_bound_tools(agent_id=agent_id)
         skills = await self._resolve_skills(session, agent_id)
@@ -87,11 +103,12 @@ class RunService:
             self._execute(
                 run_id=run_id,
                 thread_id=thread_id,
-                agent=agent,
+                agent=agent_for_run,
                 user_input=request.input,
                 max_steps=max_steps,
                 skills=skills,
                 model_credential=model_credential,
+                history=request.history,
             )
         )
         self._tasks.add(task)
@@ -123,6 +140,7 @@ class RunService:
         max_steps: int,
         skills: list[SkillDefinition],
         model_credential: ModelCredential | None,
+        history: Sequence[ChatHistoryItem] = (),
     ) -> None:
         tracer = TraceService(self._session_factory, self._broker)
 
@@ -149,6 +167,7 @@ class RunService:
                     tracer=tracer,
                     skills=skills,
                     model_credential=model_credential,
+                    history=history,
                 )
             except ModelConfigError as exc:
                 result = await self._fail_run(

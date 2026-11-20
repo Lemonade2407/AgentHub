@@ -12,26 +12,27 @@ from pydantic import BaseModel, Field
 
 
 class AgentRead(BaseModel):
-    """Agent 响应对象。"""
+    """Agent 响应对象。`model` 仅作为兼容字段，可为空（模型在对话时选择）。"""
 
     id: int
     name: str
     description: str | None = None
-    model: str
+    model: str = ""
     system_prompt: str = ""
     max_steps: int = Field(default=8, ge=1, le=20)
     enabled: bool = True
     tool_ids: list[int] = Field(default_factory=list)
+    skill_count: int = 0
     created_at: datetime
     updated_at: datetime
 
 
 class AgentCreate(BaseModel):
-    """Agent 创建请求。"""
+    """Agent 创建请求。模型不绑定在 Agent 上，运行时在对话窗口选择。"""
 
     name: str = Field(min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=512)
-    model: str = Field(min_length=1, max_length=128)
+    model: str = Field(default="", max_length=128)
     system_prompt: str = Field(default="", max_length=8000)
     max_steps: int = Field(default=8, ge=1, le=20)
     enabled: bool = True
@@ -43,7 +44,7 @@ class AgentUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=512)
-    model: str | None = Field(default=None, min_length=1, max_length=128)
+    model: str | None = Field(default=None, max_length=128)
     system_prompt: str | None = Field(default=None, max_length=8000)
     max_steps: int | None = Field(default=None, ge=1, le=20)
     enabled: bool | None = None

@@ -9,6 +9,7 @@ from app.db.session import get_session
 from app.repositories.agent_repository import AgentRepository
 from app.schemas.agent import AgentCreate, AgentRead, AgentToolBind, AgentUpdate
 from app.schemas.common import Page
+from app.services.workspace_service import ensure_agent_dir
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -20,6 +21,7 @@ async def create_agent(
 ) -> AgentRead:
     agent = await AgentRepository(session).create(payload)
     await session.commit()
+    ensure_agent_dir(agent.id)
     return agent
 
 

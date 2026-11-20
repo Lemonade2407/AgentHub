@@ -1,15 +1,61 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { openPalette, ui } from '../stores/ui'
 
 const route = useRoute()
 const title = computed(() => (route.meta.title as string | undefined) ?? 'AgentHub')
+
+// 后端连通状态：自动轮询 /api/health，后端启动后无需刷新即可变为已连接。
+const backendStatus = ref<'checking' | 'online' | 'offline'>('checking')
+let healthTimer: number | undefined
+let failures = 0
+
+function scheduleHealthCheck(delay: number) {
+  if (healthTimer) window.clearTimeout(healthTimer)
+  healthTimer = window.setTimeout(checkBackend, delay)
+}
+
+async function checkBackend() {
+  try {
+    const resp = await fetch('/api/health', { cache: 'no-store' })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    failures = 0
+    backendStatus.value = 'online'
+    scheduleHealthCheck(10_000)
+  } catch {
+    failures += 1
+    // 在线时偶发一次失败先保持状态，避免 HMR / 切页造成闪断
+    if (backendStatus.value !== 'online' || failures >= 2) {
+      backendStatus.value = 'offline'
+    }
+    scheduleHealthCheck(failures >= 2 ? 5_000 : 1_500)
+  }
+}
+
+const statusText = computed(() => {
+  if (backendStatus.value === 'online') return '后端已连接'
+  if (backendStatus.value === 'offline') return '后端未连接'
+  return '正在连接…'
+})
+
+onMounted(() => {
+  checkBackend()
+})
+
+onUnmounted(() => {
+  if (healthTimer) window.clearTimeout(healthTimer)
+})
 </script>
 
 <template>
-  <header class="topbar">
-    <button class="hamburger" type="button" aria-label="打开导航" @click="ui.sidebarOpen = true">
+  <header class="topbar" :class="{ 'sidebar-open': ui.sidebarOpen }">
+    <button
+      class="hamburger"
+      type="button"
+      :aria-label="ui.sidebarOpen ? '收起导航' : '展开导航'"
+      @click="ui.sidebarOpen = !ui.sidebarOpen"
+    >
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <path d="M4 7h16M4 12h16M4 17h16" />
       </svg>
@@ -31,7 +77,9 @@ const title = computed(() => (route.meta.title as string | undefined) ?? 'AgentH
     </button>
 
     <div class="top-actions">
-      <span class="mode-chip"><i></i>本地模式</span>
+      <span class="mode-chip" :class="backendStatus" :title="statusText" :aria-label="statusText">
+        <i></i><span class="status-text">{{ statusText }}</span>
+      </span>
       <router-link to="/settings/profile" class="avatar" aria-label="账号">L</router-link>
     </div>
   </header>
@@ -51,7 +99,7 @@ const title = computed(() => (route.meta.title as string | undefined) ?? 'AgentH
 }
 
 .hamburger {
-  display: none;
+  display: inline-flex;
   width: 32px;
   height: 32px;
   align-items: center;
@@ -70,6 +118,11 @@ const title = computed(() => (route.meta.title as string | undefined) ?? 'AgentH
   stroke: currentColor;
   stroke-width: 1.8;
   stroke-linecap: round;
+}
+
+/* 侧栏展开时，收起入口在侧栏左上角；收起后再显示顶栏按钮 */
+.topbar.sidebar-open .hamburger {
+  display: none;
 }
 
 .crumb {
@@ -162,6 +215,23 @@ kbd {
   background: var(--success);
 }
 
+.mode-chip.checking {
+  color: var(--text-muted);
+}
+
+.mode-chip.checking i {
+  background: var(--warn);
+}
+
+.mode-chip.offline {
+  color: var(--danger);
+  border-color: rgba(240, 93, 93, 0.35);
+}
+
+.mode-chip.offline i {
+  background: var(--danger);
+}
+
 .avatar {
   width: 30px;
   height: 30px;
@@ -176,10 +246,6 @@ kbd {
 }
 
 @media (max-width: 1024px) {
-  .hamburger {
-    display: inline-flex;
-  }
-
   .crumb {
     display: none;
   }
@@ -213,6 +279,12 @@ kbd {
   }
 
   .mode-chip {
+    /* 窄屏保留状态圆点，文字隐藏；title 中仍有完整状态 */
+    display: inline-flex;
+    padding: 4px 6px;
+  }
+
+  .mode-chip .status-text {
     display: none;
   }
 }

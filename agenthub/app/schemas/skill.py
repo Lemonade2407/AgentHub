@@ -108,6 +108,15 @@ class AgentSkillBindRequest(BaseModel):
     skills: list[AgentSkillBind] = Field(default_factory=list)
 
 
+class AgentSkillBindOne(BaseModel):
+    """单个绑定：`order_no` 缺省时追加到末尾。"""
+
+    skill_id: int
+    order_no: int | None = Field(default=None, ge=0, le=32767)
+    enabled: bool = True
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentSkillRead(BaseModel):
     """Agent 详情中的 Skill 列表项。"""
 

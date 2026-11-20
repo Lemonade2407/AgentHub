@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     # 其余值表示必须登录（账号体系落地后启用）。对应修改意见 Q1。
     auth_mode: str = "local"
 
+    # 模型 API 密钥加密主密钥；本地开发可由 dev.ps1 写入 agenthub/.env
+    secret_key: str = ""
+
+    # Agent / Skill 工作区根目录；为空时使用 agenthub/workspaces
+    workspace_root: str = ""
+    # 单个上传文件大小上限（字节）
+    max_upload_bytes: int = 20 * 1024 * 1024
+    # Run / Trace 保留天数；启动时自动清理更早的终态记录，0 表示不自动清理
+    run_retention_days: int = 30
+
 
 @lru_cache
 def get_settings() -> Settings:

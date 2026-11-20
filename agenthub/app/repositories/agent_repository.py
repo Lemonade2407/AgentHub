@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
 from app.db.models import Agent, AgentTool, McpTool
+from app.models.skill import AgentSkill
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
 
 _NON_NULLABLE_UPDATE_FIELDS = {"name", "model", "system_prompt", "max_steps", "enabled"}
@@ -84,7 +85,10 @@ class AgentRepository:
             .scalars()
             .all()
         )
-        return [await self._to_read(row) for row in rows], total
+        counts = await self._skill_counts([row.id for row in rows])
+        return [
+            await self._to_read(row, skill_count=counts.get(row.id, 0)) for row in rows
+        ], total
 
     async def update(self, agent_id: int, data: AgentUpdate) -> AgentRead:
         agent = await self.get_raw(agent_id)
@@ -159,7 +163,20 @@ class AgentRepository:
                 detail={"tool_ids": missing},
             )
 
-    async def _to_read(self, agent: Agent) -> AgentRead:
+    async def _skill_counts(self, agent_ids: list[int]) -> dict[int, int]:
+        """一次查询返回多个 Agent 的 Skill 绑定数量，避免卡片列表 N+1。"""
+        if not agent_ids:
+            return {}
+        rows = (
+            await self._session.execute(
+                select(AgentSkill.agent_id, func.count())
+                .where(AgentSkill.agent_id.in_(agent_ids))
+                .group_by(AgentSkill.agent_id)
+            )
+        ).all()
+        return {agent_id: int(count) for agent_id, count in rows}
+
+    async def _to_read(self, agent: Agent, *, skill_count: int | None = None) -> AgentRead:
         tool_ids = (
             (
                 await self._session.execute(
@@ -171,6 +188,16 @@ class AgentRepository:
             .scalars()
             .all()
         )
+        if skill_count is None:
+            skill_count = int(
+                (
+                    await self._session.execute(
+                        select(func.count())
+                        .select_from(AgentSkill)
+                        .where(AgentSkill.agent_id == agent.id)
+                    )
+                ).scalar_one()
+            )
         return AgentRead(
             id=agent.id,
             name=agent.name,
@@ -180,6 +207,7 @@ class AgentRepository:
             max_steps=agent.max_steps,
             enabled=agent.enabled,
             tool_ids=list(tool_ids),
+            skill_count=skill_count,
             created_at=agent.created_at,
             updated_at=agent.updated_at,
         )

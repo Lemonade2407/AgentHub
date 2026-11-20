@@ -22,7 +22,7 @@ interface ErrorBody {
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  if (init.body != null && !headers.has('Content-Type')) {
+  if (typeof init.body === 'string' && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
 
@@ -73,6 +73,11 @@ export const api = {
       body: body === undefined ? undefined : JSON.stringify(body),
     }),
   del: <T = void>(path: string) => apiRequest<T>(path, { method: 'DELETE' }),
+  upload: <T>(path: string, file: File, field = 'file') => {
+    const form = new FormData()
+    form.append(field, file)
+    return apiRequest<T>(path, { method: 'POST', body: form })
+  },
 }
 
 /** 路由不存在（后端尚未实现该接口）与“资源不存在”区分开。 */
@@ -103,6 +108,13 @@ export function formatDuration(ms: number | null | undefined): string {
   if (ms < 1000) return `${ms}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`
   return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
+}
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '-'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
 export function relativeTime(value: string): string {

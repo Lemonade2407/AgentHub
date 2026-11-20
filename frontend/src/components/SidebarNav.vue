@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { relativeTime } from '../api/http'
 import { conversations, removeConversation } from '../stores/conversations'
@@ -66,6 +67,19 @@ const groups: NavGroup[] = [
 const route = useRoute()
 const router = useRouter()
 
+const historyItems = computed(() =>
+  [...conversations.value].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+)
+
+const menu = ref<{ id: string; x: number; y: number } | null>(null)
+const menuStyle = computed(() => {
+  if (!menu.value) return {}
+  return {
+    left: `${Math.min(menu.value.x, window.innerWidth - 150)}px`,
+    top: `${Math.min(menu.value.y, window.innerHeight - 56)}px`,
+  }
+})
+
 function isActive(path: string): boolean {
   if (path === '/chat') return route.path.startsWith('/chat')
   if (path === '/agents') return route.path.startsWith('/agents')
@@ -75,27 +89,89 @@ function isActive(path: string): boolean {
 }
 
 function newChat() {
+  closeMenu()
   router.push('/chat')
-  closeSidebar()
 }
 
-function openConversation(runId: string) {
-  router.push(`/chat/${runId}`)
-  closeSidebar()
+function openConversation(id: string) {
+  closeMenu()
+  router.push(`/chat/${id}`)
 }
 
-function remove(runId: string) {
-  removeConversation(runId)
-  if (route.params.runId === runId) {
+function remove(id: string) {
+  removeConversation(id)
+  closeMenu()
+  if (route.params.runId === id) {
     router.replace('/chat')
   }
 }
+
+function openMenu(event: MouseEvent, id: string) {
+  menu.value = { id, x: event.clientX, y: event.clientY }
+}
+
+function closeMenu() {
+  menu.value = null
+}
+
+// 清空历史：第一次点击进入确认态，4 秒内再次点击才真正删除
+const clearArmed = ref(false)
+let clearTimer: number | undefined
+
+function clearAll() {
+  if (!historyItems.value.length) return
+  if (!clearArmed.value) {
+    clearArmed.value = true
+    if (clearTimer) window.clearTimeout(clearTimer)
+    clearTimer = window.setTimeout(() => (clearArmed.value = false), 4000)
+    return
+  }
+  conversations.value = []
+  clearArmed.value = false
+  if (clearTimer) window.clearTimeout(clearTimer)
+  closeMenu()
+  if (route.path.startsWith('/chat/')) {
+    router.replace('/chat')
+  }
+}
+
+function onKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    closeMenu()
+    clearArmed.value = false
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('click', closeMenu)
+  window.addEventListener('scroll', closeMenu, true)
+  window.addEventListener('keydown', onKeydown)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('click', closeMenu)
+  window.removeEventListener('scroll', closeMenu, true)
+  window.removeEventListener('keydown', onKeydown)
+  if (clearTimer) window.clearTimeout(clearTimer)
+})
 </script>
 
 <template>
   <aside class="sidebar">
     <div class="brand-row">
-      <router-link to="/chat" class="brand" @click="closeSidebar">
+      <button
+        class="collapse-btn"
+        type="button"
+        aria-label="收起侧栏"
+        title="收起侧栏，扩大工作台"
+        @click="closeSidebar"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M9 4v16" />
+        </svg>
+      </button>
+      <router-link to="/chat" class="brand">
         <span class="logo">A</span>
         <span class="brand-name">AgentHub</span>
       </router-link>
@@ -117,7 +193,6 @@ function remove(runId: string) {
           :to="item.path"
           class="nav-item"
           :class="{ active: isActive(item.path) }"
-          @click="closeSidebar"
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path :d="item.icon" />
@@ -129,33 +204,49 @@ function remove(runId: string) {
 
     <div class="history">
       <div class="history-head">
-        <span>最近对话</span>
-        <span class="muted">{{ conversations.length }}</span>
+        <span>历史对话</span>
+        <span class="history-head-right">
+          <button
+            v-if="historyItems.length"
+            class="history-clear"
+            :class="{ armed: clearArmed }"
+            type="button"
+            @click.stop="clearAll"
+          >
+            {{ clearArmed ? '确认清空？' : '清空' }}
+          </button>
+          <span class="muted">{{ conversations.length }}</span>
+        </span>
       </div>
-      <div v-if="conversations.length" class="history-list">
+      <div v-if="historyItems.length" class="history-list">
         <div
-          v-for="item in conversations"
-          :key="item.runId"
+          v-for="item in historyItems"
+          :key="item.id"
           class="history-item"
-          :class="{ active: route.params.runId === item.runId }"
+          :class="{ active: route.params.runId === item.id }"
+          @contextmenu.prevent.stop="openMenu($event, item.id)"
         >
-          <button class="history-open" type="button" @click="openConversation(item.runId)">
+          <button class="history-open" type="button" @click="openConversation(item.id)">
             <span class="history-title">{{ item.title }}</span>
             <span class="history-meta">
-              {{ item.agentName }} · {{ relativeTime(item.createdAt) }}
+              {{ item.agentName }} · {{ relativeTime(item.updatedAt) }} · {{ item.messages.length }} 条
             </span>
           </button>
           <button
             class="history-remove"
             type="button"
-            aria-label="删除会话"
-            @click.stop="remove(item.runId)"
+            aria-label="删除对话"
+            @click.stop="remove(item.id)"
           >
             ×
           </button>
         </div>
       </div>
-      <p v-else class="history-empty">发送第一条消息后，会话会出现在这里。</p>
+      <p v-else class="history-empty">点击“新建对话”开始聊天，历史会出现在这里。</p>
+    </div>
+
+    <div v-if="menu" class="history-menu" :style="menuStyle" @click.stop>
+      <button type="button" @click="remove(menu.id)">删除对话</button>
     </div>
 
     <div class="sidebar-foot">
@@ -176,10 +267,44 @@ function remove(runId: string) {
   background: var(--bg-panel);
   border-right: 1px solid var(--border-color);
   min-height: 0;
+  overflow-y: auto;
 }
 
 .brand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 0 6px;
+}
+
+.collapse-btn {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.collapse-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-color);
+  color: var(--text-main);
+}
+
+.collapse-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .brand {
@@ -303,7 +428,8 @@ function remove(runId: string) {
 
 .history {
   flex: 1;
-  min-height: 0;
+  /* 小屏高度下也保留可用的历史区，避免被上方导航压缩为 0 */
+  min-height: 180px;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border-color);
@@ -317,6 +443,32 @@ function remove(runId: string) {
   font-size: 11px;
   color: var(--text-muted);
   letter-spacing: 0.4px;
+}
+
+.history-head-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.history-clear {
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  cursor: pointer;
+}
+
+.history-clear:hover {
+  color: var(--danger);
+}
+
+.history-clear.armed {
+  color: var(--danger);
+  font-weight: 600;
 }
 
 .history-list {
@@ -404,6 +556,34 @@ function remove(runId: string) {
   line-height: 1.5;
 }
 
+.history-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 128px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+.history-menu button {
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--danger);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-menu button:hover {
+  background: var(--danger-soft);
+}
+
 .sidebar-foot {
   display: flex;
   align-items: center;
@@ -421,26 +601,11 @@ function remove(runId: string) {
   background: var(--success);
 }
 
-@media (max-width: 1024px) {
-  .sidebar {
-    position: fixed;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    z-index: 50;
-    transform: translateX(-100%);
-    transition: transform 0.2s ease;
-    box-shadow: var(--shadow-pop);
-  }
-
-  .sidebar-open .sidebar {
-    transform: translateX(0);
-  }
-}
-
+/* 窄屏仍保持并排，只收窄侧栏，保证工作台可同时操作 */
 @media (max-width: 768px) {
   .sidebar {
-    padding-bottom: 64px;
+    width: min(220px, 55vw);
+    padding: 12px 8px;
   }
 }
 </style>

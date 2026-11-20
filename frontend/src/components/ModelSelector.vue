@@ -28,7 +28,9 @@ const listStyle = ref<Record<string, string>>({})
 const open = ref(false)
 const options = ref<Option[]>([])
 const loaded = ref(false)
+const loading = ref(false)
 const unavailable = ref(false)
+const emptyApis = ref<string[]>([])
 
 const MENU_WIDTH = 300
 const MENU_MARGIN = 8
@@ -59,7 +61,7 @@ function positionMenu() {
 
 const currentLabel = computed(() => {
   const match = options.value.find((option) => option.value === props.modelValue)
-  return match?.label ?? (props.modelValue || '默认')
+  return match?.label ?? (props.modelValue || '对话时选择')
 })
 
 const groups = computed(() => {
@@ -73,14 +75,21 @@ const groups = computed(() => {
 })
 
 async function load() {
+  loading.value = true
   try {
     const raw = await api.get<ModelApiOption[] | { items: ModelApiOption[] }>(
       '/api/model-apis/available',
     )
     const tree = Array.isArray(raw) ? raw : (raw.items ?? [])
     const items: Option[] = []
+    const empties: string[] = []
     for (const apiItem of tree) {
-      for (const model of apiItem.models ?? []) {
+      const models = apiItem.models ?? []
+      if (!models.length) {
+        empties.push(apiItem.name)
+        continue
+      }
+      for (const model of models) {
         items.push({
           value: `${apiItem.provider}/${model.model_key}`,
           label: model.display_name || model.model_key,
@@ -89,16 +98,19 @@ async function load() {
       }
     }
     options.value = items
+    emptyApis.value = empties
     unavailable.value = false
   } catch (error) {
     // 后端 WP-1.2 未就绪时回落 V1 的 provider/model 字符串
     unavailable.value = isRouteMissing(error)
     options.value = []
+    emptyApis.value = []
   } finally {
     if (!options.value.some((option) => option.value === props.modelValue) && props.modelValue) {
       options.value.unshift({ value: props.modelValue, label: props.modelValue, group: '当前模型' })
     }
-    if (!options.value.length) {
+    // 只有后端接口不可用时才展示常用模型兜底；真实“空数据”不伪装成可用模型
+    if (!options.value.length && unavailable.value) {
       options.value = FALLBACK_MODELS.map((value) => ({
         value,
         label: value,
@@ -106,6 +118,7 @@ async function load() {
       }))
     }
     loaded.value = true
+    loading.value = false
   }
 }
 
@@ -129,6 +142,8 @@ function toggle() {
     return
   }
   open.value = true
+  // 每次打开都刷新，新增的模型 API / 模型无需刷新页面即可出现
+  void load()
   document.addEventListener('click', onDocumentClick)
   window.addEventListener('resize', positionMenu)
   window.addEventListener('scroll', positionMenu, true)
@@ -140,8 +155,14 @@ function choose(option: Option) {
   close()
 }
 
-onMounted(load)
-onBeforeUnmount(close)
+onMounted(() => {
+  void load()
+  window.addEventListener('focus', load)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('focus', load)
+  close()
+})
 </script>
 
 <template>
@@ -179,11 +200,20 @@ onBeforeUnmount(close)
               <span class="model-option-key">{{ option.value }}</span>
             </button>
           </template>
-          <p v-if="!loaded" class="model-note">加载中…</p>
+          <p v-if="emptyApis.length" class="model-note">
+            以下模型 API 还没有模型：{{ emptyApis.join('、') }}。请先在「管理模型 API」中添加模型。
+          </p>
+          <p v-if="loaded && !groups.length && !emptyApis.length && !unavailable" class="model-note">
+            暂无可用模型，请先在「管理模型 API」中添加模型。
+          </p>
+          <p v-if="loading" class="model-note">加载中…</p>
         </div>
-        <router-link to="/settings/models" class="model-foot" @click="close">
-          管理模型 API
-        </router-link>
+        <div class="model-foot-row">
+          <button class="model-refresh" type="button" @click.stop="load">刷新</button>
+          <router-link to="/settings/models" class="model-foot" @click="close">
+            管理模型 API
+          </router-link>
+        </div>
       </div>
     </Teleport>
   </div>
@@ -297,11 +327,37 @@ onBeforeUnmount(close)
   color: var(--text-muted);
 }
 
-.model-foot {
-  display: block;
-  padding: 7px 8px 3px;
+.model-foot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   margin-top: 4px;
+  padding: 4px 8px 2px;
   border-top: 1px solid var(--border-color);
+}
+
+.model-refresh {
+  padding: 2px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.model-refresh:hover {
+  color: var(--text-main);
+  border-color: var(--border-strong);
+}
+
+.model-foot {
+  display: inline-block;
+  padding: 2px 0;
+  margin: 0;
+  border: none;
   font-size: 12px;
   color: var(--text-muted);
 }

@@ -95,13 +95,16 @@ class SnapshotTool(BaseModel):
 
 
 class AgentSnapshot(BaseModel):
-    """发布快照的完整结构（`schema_version` 决定兼容策略）。"""
+    """发布快照的完整结构（`schema_version` 决定兼容策略）。
+
+    `suggested_model` 可为空：V2 允许 Agent 不绑定模型，由安装者在对话时选择。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = SNAPSHOT_SCHEMA_VERSION
     agent: SnapshotAgent
-    suggested_model: SuggestedModel
+    suggested_model: SuggestedModel | None = None
     skills: list[SnapshotSkill] = Field(default_factory=list)
     tools: list[SnapshotTool] = Field(default_factory=list)
 
@@ -220,7 +223,10 @@ def _split_qualified_name(qualified_name: str) -> tuple[str, str]:
     return server_name, remote_name or qualified_name
 
 
-def _suggested_model_from(model: str) -> SuggestedModel:
+def _suggested_model_from(model: str) -> SuggestedModel | None:
+    model = (model or "").strip()
+    if not model:
+        return None
     provider, _, name = model.partition("/")
     if not provider or not name:
         return SuggestedModel(provider="custom", model_key=model)

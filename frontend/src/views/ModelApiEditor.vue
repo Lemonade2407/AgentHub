@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, errorMessage, isRouteMissing } from '../api/http'
+import { api, ApiError, errorMessage, isRouteMissing } from '../api/http'
 import { DEMO_MODEL_APIS } from '../data/demo'
 import {
   PROVIDERS,
@@ -24,8 +24,10 @@ const rawId = computed(() => {
   const value = route.params.id
   return Array.isArray(value) ? value[0] : value
 })
-const isNew = computed(() => rawId.value === 'new')
-const apiId = computed(() => Number(rawId.value))
+const isNew = computed(
+  () => route.name === 'model-api-new' || rawId.value === 'new',
+)
+const apiId = computed(() => (isNew.value ? Number.NaN : Number(rawId.value)))
 
 const form = reactive({
   name: '',
@@ -40,12 +42,55 @@ const form = reactive({
 const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
+const fetching = ref(false)
 const demoMode = ref(route.query.demo === '1')
 const existing = ref<ModelApi | null>(null)
 const error = ref('')
 const message = ref('')
 const testText = ref('')
 const modelDraft = ref('')
+
+// 各 Provider 的推荐地址与常用模型：选服务商后自动填入，方便“填 Key 即用”
+const PROVIDER_PRESETS: Record<string, { base_url: string; models: string[] }> = {
+  deepseek: {
+    base_url: 'https://api.deepseek.com/v1',
+    models: ['deepseek-chat', 'deepseek-reasoner'],
+  },
+  openai: {
+    base_url: 'https://api.openai.com/v1',
+    models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'],
+  },
+  qwen: {
+    base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen-plus', 'qwen-max', 'qwen-turbo'],
+  },
+  custom: { base_url: '', models: [] },
+}
+
+const suggestedModels = computed(() => {
+  const preset = PROVIDER_PRESETS[form.provider]
+  if (!preset) return []
+  const added = new Set(form.models.map((item) => item.model_key))
+  return preset.models.filter((key) => !added.has(key))
+})
+
+function onProviderChange() {
+  const preset = PROVIDER_PRESETS[form.provider]
+  if (!preset) return
+  const knownBaseUrls = Object.values(PROVIDER_PRESETS).map((item) => item.base_url)
+  if (!form.base_url.trim() || knownBaseUrls.includes(form.base_url.trim())) {
+    form.base_url = preset.base_url
+  }
+  if (!form.name.trim()) {
+    form.name = PROVIDERS.find((item) => item.value === form.provider)?.label ?? ''
+  }
+}
+
+function quickAddModel(key: string) {
+  if (!key.trim()) return
+  if (form.models.some((model) => model.model_key === key)) return
+  form.models.push({ model_key: key, display_name: key })
+}
 
 function modelsOf(item: ModelApi): ModelApiModel[] {
   return item.models ?? item.model_api_models ?? []
@@ -273,6 +318,88 @@ async function test() {
   }
 }
 
+async function quickSaveAndFetch() {
+  error.value = ''
+  message.value = ''
+  testText.value = ''
+  if (!form.name.trim()) {
+    error.value = '请填写名称'
+    return
+  }
+  if (!form.base_url.trim()) {
+    error.value = '请填写 Base URL'
+    return
+  }
+  if (isNew.value && !form.api_key.trim()) {
+    error.value = '请填写 API Key'
+    return
+  }
+
+  fetching.value = true
+  try {
+    let targetId = apiId.value
+    if (isNew.value) {
+      const created = await api.post<ModelApi>('/api/model-apis', {
+        name: form.name.trim(),
+        provider: form.provider,
+        base_url: form.base_url.trim(),
+        api_key: form.api_key.trim(),
+        is_default: form.is_default,
+        enabled: form.enabled,
+      })
+      targetId = created.id
+    } else {
+      const payload: Record<string, unknown> = {
+        name: form.name.trim(),
+        provider: form.provider,
+        base_url: form.base_url.trim(),
+        is_default: form.is_default,
+        enabled: form.enabled,
+      }
+      if (form.api_key.trim()) payload.api_key = form.api_key.trim()
+      await api.put(`/api/model-apis/${targetId}`, payload)
+    }
+
+    const result = await api.post<ModelApiTestResult>(`/api/model-apis/${targetId}/test`)
+    let keys = result.ok ? (result.models ?? []) : []
+    if (result.ok && !keys.length) keys = PROVIDER_PRESETS[form.provider]?.models ?? []
+
+    const wanted = new Set<string>([
+      ...form.models.map((model) => model.model_key),
+      ...keys,
+    ])
+    for (const key of wanted) {
+      try {
+        await api.post(`/api/model-apis/${targetId}/models`, {
+          model_key: key,
+          display_name: key,
+          enabled: true,
+        })
+      } catch (e) {
+        if (!(e instanceof ApiError) || e.status !== 409) throw e
+      }
+    }
+
+    if (result.ok) {
+      testText.value = `连接成功${
+        result.latency_ms != null ? ` · ${result.latency_ms}ms` : ''
+      } · 已添加 ${wanted.size} 个模型`
+    } else {
+      error.value = `已保存，但连接测试失败：${result.error ?? '未知错误'}`
+    }
+
+    if (isNew.value) {
+      await router.replace(`/settings/models/${targetId}`)
+    } else {
+      await loadItem()
+    }
+  } catch (e) {
+    error.value = errorMessage(e, '保存并拉取模型失败')
+  } finally {
+    fetching.value = false
+  }
+}
+
 async function remove() {
   if (!window.confirm(`确定删除「${form.name}」？被 Agent 引用时会被拒绝。`)) return
   error.value = ''
@@ -289,6 +416,12 @@ async function remove() {
   }
 }
 
+watch(
+  () => route.fullPath,
+  () => {
+    void loadItem()
+  },
+)
 onMounted(loadItem)
 </script>
 
@@ -297,7 +430,10 @@ onMounted(loadItem)
     <header class="page-header">
       <div>
         <h1 class="page-title">{{ isNew ? '新建模型 API' : form.name || '编辑模型 API' }}</h1>
-        <p v-if="!isNew && !loading" class="muted page-desc">
+        <p v-if="isNew" class="muted page-desc">
+          选择服务商、填入 API Key，点击“保存并拉取模型”即可直接使用。
+        </p>
+        <p v-else-if="!loading" class="muted page-desc">
           {{ providerLabel(form.provider) }} · {{ form.base_url }}
         </p>
       </div>
@@ -325,7 +461,7 @@ onMounted(loadItem)
         </label>
         <label>
           <span>Provider</span>
-          <select v-model="form.provider">
+          <select v-model="form.provider" @change="onProviderChange">
             <option v-for="item in PROVIDERS" :key="item.value" :value="item.value">
               {{ item.label }}
             </option>
@@ -352,7 +488,9 @@ onMounted(loadItem)
           autocomplete="new-password"
           :placeholder="isNew ? '例如：sk-...' : '不修改则留空'"
         />
-        <small class="field-hint">仅写入，页面不会回显明文</small>
+        <small class="field-hint">
+          仅写入，页面不会回显明文。保存时若上游支持 /models，会自动拉取可用模型。
+        </small>
       </label>
 
       <div class="row">
@@ -373,6 +511,18 @@ onMounted(loadItem)
           />
           <button class="btn btn-sm" type="button" @click="addModel">添加</button>
         </div>
+        <div v-if="suggestedModels.length" class="suggested">
+          <span class="field-hint">推荐模型：</span>
+          <button
+            v-for="key in suggestedModels"
+            :key="key"
+            class="suggested-chip"
+            type="button"
+            @click="quickAddModel(key)"
+          >
+            + {{ key }}
+          </button>
+        </div>
       </div>
 
       <div class="row two">
@@ -387,8 +537,16 @@ onMounted(loadItem)
       </div>
 
       <div class="actions">
-        <button class="btn-primary" type="submit" :disabled="saving">
-          {{ saving ? '保存中…' : '保存' }}
+        <button
+          class="btn-primary"
+          type="button"
+          :disabled="saving || fetching"
+          @click="quickSaveAndFetch"
+        >
+          {{ fetching ? '保存并拉取中…' : '保存并拉取模型' }}
+        </button>
+        <button class="btn" type="submit" :disabled="saving || fetching">
+          {{ saving ? '保存中…' : '仅保存' }}
         </button>
       </div>
     </form>
@@ -493,6 +651,30 @@ select {
 .model-add {
   display: flex;
   gap: 8px;
+}
+
+.suggested {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.suggested-chip {
+  padding: 2px 9px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.suggested-chip:hover {
+  border-color: var(--accent);
+  color: var(--text-main);
 }
 
 .model-add input {

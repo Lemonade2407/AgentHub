@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api, errorMessage, formatDateTime } from '../api/http'
+import ToggleSwitch from '../components/ToggleSwitch.vue'
 import type { Agent, Page } from '../types/api'
 
 const agents = ref<Agent[]>([])
@@ -11,6 +12,7 @@ const keyword = ref('')
 const loading = ref(false)
 const error = ref('')
 const busyId = ref<number | null>(null)
+const togglingId = ref<number | null>(null)
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 
@@ -59,6 +61,21 @@ async function removeAgent(agent: Agent) {
   }
 }
 
+async function toggleAgent(agent: Agent, enabled: boolean) {
+  const previous = agent.enabled
+  agent.enabled = enabled
+  togglingId.value = agent.id
+  error.value = ''
+  try {
+    await api.put<Agent>(`/api/agents/${agent.id}`, { enabled })
+  } catch (e) {
+    agent.enabled = previous
+    error.value = errorMessage(e, '更新启用状态失败')
+  } finally {
+    togglingId.value = null
+  }
+}
+
 onMounted(loadAgents)
 </script>
 
@@ -90,15 +107,23 @@ onMounted(loadAgents)
             <h3>{{ agent.name }}</h3>
             <span v-if="agent.description" class="desc">{{ agent.description }}</span>
           </div>
-          <span class="badge" :class="agent.enabled ? 'on' : 'off'">
-            {{ agent.enabled ? '启用' : '停用' }}
-          </span>
+          <div class="enable-control">
+            <span class="enable-label" :class="{ on: agent.enabled }">
+              {{ agent.enabled ? '启用' : '停用' }}
+            </span>
+            <ToggleSwitch
+              :model-value="agent.enabled"
+              :disabled="togglingId === agent.id"
+              @change="toggleAgent(agent, $event)"
+            />
+          </div>
         </div>
 
         <div class="facts">
-          <span class="fact"><em>模型</em><code>{{ agent.model }}</code></span>
+          <span class="fact"><em>模型</em><code>{{ agent.model || '对话时选择' }}</code></span>
           <span class="fact"><em>步数</em>{{ agent.max_steps }}</span>
           <span class="fact"><em>工具</em>{{ agent.tool_ids.length }}</span>
+          <span class="fact"><em>Skills</em>{{ agent.skill_count ?? 0 }}</span>
         </div>
 
         <div class="card-foot">
@@ -170,6 +195,22 @@ onMounted(loadAgents)
 
 .title-block {
   min-width: 0;
+}
+
+.enable-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.enable-label {
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.enable-label.on {
+  color: var(--success);
 }
 
 .title-block h3 {

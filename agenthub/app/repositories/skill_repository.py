@@ -27,6 +27,7 @@ from app.models.skill import AgentSkill, Skill, SkillTool
 from app.models.user import AppUser
 from app.schemas.skill import (
     AgentSkillBind,
+    AgentSkillBindOne,
     AgentSkillRead,
     SkillCreate,
     SkillExport,
@@ -244,12 +245,17 @@ class SkillRepository:
 
     async def delete(self, *, owner_id: int, skill_id: int) -> None:
         skill = await self._get_owned(owner_id, skill_id)
+        # 只统计未删除 Agent 的挂载；软删除 Agent 残留的绑定不应阻止删除 Skill
         in_use = int(
             (
                 await self._session.execute(
                     select(func.count())
                     .select_from(AgentSkill)
-                    .where(AgentSkill.skill_id == skill_id)
+                    .join(AgentRow, AgentRow.id == AgentSkill.agent_id)
+                    .where(
+                        AgentSkill.skill_id == skill_id,
+                        AgentRow.deleted_at.is_(None),
+                    )
                 )
             ).scalar_one()
         )
@@ -260,6 +266,10 @@ class SkillRepository:
                 http_status=409,
                 detail={"agent_count": in_use},
             )
+        # 清理已删除 Agent 的残留绑定，避免 agent_skill 外键（RESTRICT）阻止删除
+        await self._session.execute(
+            delete(AgentSkill).where(AgentSkill.skill_id == skill_id)
+        )
         await self._session.execute(delete(Skill).where(Skill.id == skill.id))
 
     async def publish(self, *, owner_id: int, skill_id: int) -> SkillRead:
@@ -464,6 +474,84 @@ class SkillRepository:
             )
         await self._session.flush()
         return await self.agent_skills(agent_id=agent_id)
+
+    async def bind_agent_skill(
+        self,
+        *,
+        agent_id: int,
+        owner_id: int,
+        bind: AgentSkillBindOne,
+    ) -> AgentSkillRead:
+        """绑定单个 Skill；已存在时更新顺序 / 启停 / 参数覆盖。"""
+        await self._ensure_agent(agent_id)
+
+        skill = (
+            await self._session.execute(
+                select(Skill).where(Skill.id == bind.skill_id, Skill.owner_id == owner_id)
+            )
+        ).scalar_one_or_none()
+        if skill is None:
+            raise AppError(
+                "SKILL_NOT_FOUND",
+                "挂载的 Skill 不存在或不属于当前用户",
+                http_status=404,
+                detail={"skill_ids": [bind.skill_id]},
+            )
+
+        parameters = parameters_from_schema(skill.input_schema)
+        validate_params(parameters, bind.params)
+
+        link = (
+            await self._session.execute(
+                select(AgentSkill).where(
+                    AgentSkill.agent_id == agent_id,
+                    AgentSkill.skill_id == bind.skill_id,
+                )
+            )
+        ).scalar_one_or_none()
+
+        if link is None:
+            order_no = bind.order_no
+            if order_no is None:
+                max_order = (
+                    await self._session.execute(
+                        select(func.max(AgentSkill.order_no)).where(
+                            AgentSkill.agent_id == agent_id
+                        )
+                    )
+                ).scalar_one()
+                order_no = int(max_order or -1) + 1
+            link = AgentSkill(
+                agent_id=agent_id,
+                skill_id=bind.skill_id,
+                order_no=order_no,
+                enabled=bind.enabled,
+                params=bind.params,
+            )
+            self._session.add(link)
+        else:
+            if bind.order_no is not None:
+                link.order_no = bind.order_no
+            link.enabled = bind.enabled
+            link.params = bind.params
+
+        await self._session.flush()
+        items = await self.agent_skills(agent_id=agent_id)
+        for item in items:
+            if item.skill_id == bind.skill_id:
+                return item
+        raise AppError("SKILL_NOT_FOUND", "Skill 绑定结果缺失", http_status=404)
+
+    async def unbind_agent_skill(self, *, agent_id: int, skill_id: int) -> None:
+        """解绑单个 Skill；未绑定时幂等返回。"""
+        await self._ensure_agent(agent_id)
+        await self._session.execute(
+            delete(AgentSkill).where(
+                AgentSkill.agent_id == agent_id,
+                AgentSkill.skill_id == skill_id,
+            )
+        )
+        await self._session.flush()
 
     async def resolve_for_agent(self, *, agent_id: int) -> list[SkillDefinition]:
         """运行期解析：返回按 `order_no` 排序的 Skill 快照（含工具可用性）。"""

@@ -24,6 +24,7 @@ from app.models.user import AppUser
 from app.repositories.skill_repository import SkillRepository
 from app.schemas.common import Page
 from app.schemas.skill import (
+    AgentSkillBindOne,
     AgentSkillBindRequest,
     AgentSkillRead,
     SkillCreate,
@@ -31,6 +32,7 @@ from app.schemas.skill import (
     SkillRead,
     SkillUpdate,
 )
+from app.services.workspace_service import ensure_skill_dir
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 agent_router = APIRouter(prefix="/api/agents", tags=["skills"])
@@ -119,6 +121,7 @@ async def create_skill(
 ) -> SkillRead:
     skill = await _guard(SkillRepository(session).create(owner_id=user.id, data=payload))
     await session.commit()
+    ensure_skill_dir(skill.id)
     return skill
 
 
@@ -172,6 +175,7 @@ async def archive_skill(skill_id: int, session: SessionDep, user: CurrentUser) -
 async def install_skill(skill_id: int, session: SessionDep, user: CurrentUser) -> SkillRead:
     skill = await SkillRepository(session).install(user_id=user.id, skill_id=skill_id)
     await session.commit()
+    ensure_skill_dir(skill.id)
     return skill
 
 
@@ -208,3 +212,41 @@ async def replace_agent_skills(
     )
     await session.commit()
     return skills
+
+
+@agent_router.post(
+    "/{agent_id}/skills",
+    response_model=AgentSkillRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def bind_agent_skill(
+    agent_id: int,
+    payload: AgentSkillBindOne,
+    session: SessionDep,
+    user: CurrentUser,
+) -> AgentSkillRead:
+    """绑定单个 Skill；重复绑定视为更新（顺序 / 启停 / 参数覆盖）。"""
+    skill = await _guard(
+        SkillRepository(session).bind_agent_skill(
+            agent_id=agent_id,
+            owner_id=user.id,
+            bind=payload,
+        )
+    )
+    await session.commit()
+    return skill
+
+
+@agent_router.delete("/{agent_id}/skills/{skill_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def unbind_agent_skill(
+    agent_id: int,
+    skill_id: int,
+    session: SessionDep,
+    user: CurrentUser,
+) -> Response:
+    """解绑单个 Skill；未绑定时也返回 204（幂等）。"""
+    await SkillRepository(session).unbind_agent_skill(
+        agent_id=agent_id, skill_id=skill_id
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

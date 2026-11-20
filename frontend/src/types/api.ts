@@ -16,7 +16,14 @@ export interface Agent {
   max_steps: number
   enabled: boolean
   tool_ids: number[]
+  skill_count: number
   created_at: string
+  updated_at: string
+}
+
+export interface WorkspaceFile {
+  name: string
+  size: number
   updated_at: string
 }
 

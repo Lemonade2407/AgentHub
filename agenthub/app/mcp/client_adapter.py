@@ -82,7 +82,9 @@ class McpClientAdapter(Protocol):
     async def list_tools(self) -> list[McpToolInfo]:
         """调用 `tools/list`（自动处理分页），返回原始 Tool 列表。"""
 
-    async def call_tool(self, remote_name: str, arguments: dict) -> McpCallResult:
+    async def call_tool(
+        self, remote_name: str, arguments: dict, meta: dict | None = None
+    ) -> McpCallResult:
         """调用 `tools/call`。协议层失败抛 `McpClientError`。"""
 
 
@@ -214,9 +216,15 @@ class StreamableHttpMcpClient:
             if not cursor:
                 return tools
 
-    async def call_tool(self, remote_name: str, arguments: dict) -> McpCallResult:
+    async def call_tool(
+        self, remote_name: str, arguments: dict, meta: dict | None = None
+    ) -> McpCallResult:
         await self._ensure_initialized()
-        result = await self._rpc("tools/call", {"name": remote_name, "arguments": arguments})
+        params: dict[str, Any] = {"name": remote_name, "arguments": arguments}
+        if meta:
+            # MCP 允许在请求中携带 `_meta`；平台用它把 agent_id / run_id 传给工具
+            params["_meta"] = meta
+        result = await self._rpc("tools/call", params)
         return McpCallResult(
             content=list(result.get("content") or []),
             is_error=bool(result.get("isError")),
@@ -236,7 +244,7 @@ class StreamableHttpMcpClient:
             "method": method,
             "params": params,
         }
-        response = await self._post(payload)
+        response = await self._post_with_recovery(payload, method)
         if session_id := response.headers.get("mcp-session-id"):
             self._session_id = session_id
         if response.status_code >= 400:
@@ -264,6 +272,20 @@ class StreamableHttpMcpClient:
             return
         if session_id := response.headers.get("mcp-session-id"):
             self._session_id = session_id
+
+    async def _post_with_recovery(self, payload: dict, method: str) -> httpx.Response:
+        """发送请求；连接失败（多见于 MCP Server 重启后连接池残留）时重建会话重试一次。"""
+        try:
+            return await self._post(payload)
+        except McpClientError as exc:
+            if exc.error_code != MCP_SERVER_UNREACHABLE:
+                raise
+            logger.info("MCP 连接失败，重建会话后重试一次：%s", exc.message)
+            self._initialized = False
+            self._session_id = None
+            if method != "initialize":
+                await self.initialize()
+            return await self._post(payload)
 
     async def _post(self, payload: dict) -> httpx.Response:
         try:

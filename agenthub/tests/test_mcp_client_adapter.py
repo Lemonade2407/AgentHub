@@ -158,6 +158,36 @@ async def test_server_headers_are_sent() -> None:
     await http_client.aclose()
 
 
+async def test_client_recovers_after_connection_failure() -> None:
+    """MCP Server 重启会留下失效连接：首次连接失败后应重建会话并重试成功。"""
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise httpx.ConnectError("connection reset by peer")
+        if payload["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        return httpx.Response(
+            200,
+            json={
+                "jsonrpc": "2.0",
+                "id": payload.get("id"),
+                "result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "demo"}},
+            },
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = StreamableHttpMcpClient(make_server(), http_client=http_client)
+
+    server_info = await client.initialize()
+
+    assert server_info["serverInfo"]["name"] == "demo"
+    assert calls["count"] >= 2
+    await http_client.aclose()
+
+
 async def test_factory_reuses_and_invalidates_clients() -> None:
     factory = HttpMcpClientFactory()
     server = make_server(id=7)

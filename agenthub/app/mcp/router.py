@@ -118,7 +118,11 @@ class ToolRouter(McpToolGateway):
         client = self._client_factory.for_server(server)
         try:
             result = await asyncio.wait_for(
-                client.call_tool(tool.remote_name, call.arguments),
+                client.call_tool(
+                    tool.remote_name,
+                    call.arguments,
+                    meta={"agent_id": ctx.agent_id, "run_id": ctx.run_id},
+                ),
                 timeout=ctx.timeout_ms / 1000,
             )
         except TimeoutError:

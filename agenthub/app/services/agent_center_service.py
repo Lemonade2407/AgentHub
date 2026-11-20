@@ -37,7 +37,7 @@ from app.db.models import Agent as AgentRow
 from app.db.models import AgentTool as AgentToolRow
 from app.mcp.schemas import ToolDefinition
 from app.models.mcp import McpServer, McpTool
-from app.models.model_api import ModelApi, ModelApiModel
+from app.models.model_api import ModelApi
 from app.models.publication import AgentPublication, PublicationInstall
 from app.models.skill import AgentSkill, Skill
 from app.schemas.agent_center import (
@@ -179,6 +179,7 @@ class AgentCenterService:
         if default_api is None:
             warnings.append("MODEL_API_NOT_CONFIGURED: 安装后请先配置模型 API")
 
+        suggested = snapshot.suggested_model
         return PrecheckRead(
             publication_id=publication.id,
             title=publication.title,
@@ -191,9 +192,11 @@ class AgentCenterService:
             missing_tools=plan.missing_tools,
             warnings=warnings,
             suggested_model=SuggestedModelRead(
-                provider=snapshot.suggested_model.provider,
-                model_key=snapshot.suggested_model.model_key,
-            ),
+                provider=suggested.provider,
+                model_key=suggested.model_key,
+            )
+            if suggested is not None
+            else None,
         )
 
     # ------------------------------------------------------------------
@@ -232,17 +235,11 @@ class AgentCenterService:
             )
 
         agent_name = await self._unique_agent_name(snapshot.agent.name)
-        default_api = await self._default_model_api(installer_id)
-        default_model = await self._default_model(default_api)
-        if default_api is not None and default_model is not None:
-            model_label = f"{default_api.provider}/{default_model.model_key}"
-        else:
-            model_label = f"{snapshot.suggested_model.provider}/{snapshot.suggested_model.model_key}"
-
+        # 模型统一在对话窗口选择：安装副本不再绑定默认 / 推荐模型
         agent = AgentRow(
             name=agent_name,
             description=snapshot.agent.description,
-            model=model_label[:128],
+            model="",
             system_prompt=snapshot.agent.system_prompt,
             max_steps=snapshot.agent.max_steps,
             enabled=True,
@@ -255,8 +252,8 @@ class AgentCenterService:
         await self._assign_agent_scope(
             agent_id=agent.id,
             installer_id=installer_id,
-            model_api_id=default_api.id if default_model is not None else None,
-            model_key=default_model.model_key if default_model is not None else None,
+            model_api_id=None,
+            model_key=None,
         )
 
         for order_no, item in enumerate(plan.skills):
@@ -440,34 +437,6 @@ class AgentCenterService:
             )
         ).scalar_one_or_none()
 
-    async def _default_model(self, api: ModelApi | None) -> ModelApiModel | None:
-        if api is None:
-            return None
-        row = (
-            await self._session.execute(
-                select(ModelApiModel)
-                .where(
-                    ModelApiModel.model_api_id == api.id,
-                    ModelApiModel.enabled.is_(True),
-                    ModelApiModel.is_default.is_(True),
-                )
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        if row is not None:
-            return row
-        return (
-            await self._session.execute(
-                select(ModelApiModel)
-                .where(
-                    ModelApiModel.model_api_id == api.id,
-                    ModelApiModel.enabled.is_(True),
-                )
-                .order_by(ModelApiModel.id)
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-
     async def _assign_agent_scope(
         self,
         *,
@@ -547,11 +516,11 @@ def _to_definition(tool: McpTool, server_name: str) -> ToolDefinition:
 def _next_steps(plan: DependencyPlan, *, model_ready: bool) -> list[str]:
     steps: list[str] = []
     if not model_ready:
-        steps.append("先在「模型 API」中配置可用模型，并在 Agent 编辑器中选择")
+        steps.append("先在「模型 API」中配置可用模型，并在对话窗口选择")
     for item in plan.missing_skills:
         steps.append(f"安装缺失 Skill：{item.slug} v{item.version}")
     for item in plan.missing_tools:
         steps.append(f"注册 MCP Server 并 Discovery：{item.server_name}（缺少 {item.remote_name}）")
     if not steps:
-        steps.append("依赖已齐备，可直接打开 Agent 编辑器调试运行")
+        steps.append("依赖已齐备，可直接打开对话窗口并选择模型运行")
     return steps

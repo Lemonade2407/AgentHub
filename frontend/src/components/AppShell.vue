@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ui, closeSidebar } from '../stores/ui'
+import { ui } from '../stores/ui'
 import SidebarNav from './SidebarNav.vue'
 import TopBar from './TopBar.vue'
 import CommandPalette from './CommandPalette.vue'
@@ -21,17 +21,11 @@ defineProps<{
       </main>
     </div>
 
-    <div v-if="ui.sidebarOpen" class="scrim" @click="closeSidebar"></div>
     <CommandPalette />
 
-    <!-- 移动端底部标签栏（§6.4 响应式 <768） -->
-    <nav class="mobile-tabs">
-      <router-link to="/chat" class="mobile-tab">工作台</router-link>
-      <router-link to="/agents" class="mobile-tab">Agents</router-link>
-      <router-link to="/skills" class="mobile-tab">Skills</router-link>
-      <router-link to="/agent-center" class="mobile-tab">广场</router-link>
-      <button class="mobile-tab" type="button" @click="ui.sidebarOpen = true">更多</button>
-    </nav>
+    <Transition name="global-toast">
+      <div v-if="ui.notice" class="global-toast">{{ ui.notice }}</div>
+    </Transition>
   </div>
 </template>
 
@@ -62,61 +56,34 @@ defineProps<{
   overflow: hidden;
 }
 
-.scrim {
+/* 侧栏与工作台并排：展开时仍可直接操作工作台，不产生遮罩 */
+.shell:not(.sidebar-open) .sidebar {
   display: none;
 }
 
-.mobile-tabs {
-  display: none;
+.global-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 36px;
+  z-index: 3000;
+  transform: translateX(-50%);
+  padding: 8px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-main);
+  font-size: 12.5px;
+  box-shadow: var(--shadow-pop);
 }
 
-@media (max-width: 1024px) {
-  .scrim {
-    display: block;
-    position: fixed;
-    inset: 0;
-    background: rgba(5, 7, 10, 0.6);
-    z-index: 40;
-  }
+.global-toast-enter-active,
+.global-toast-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
 }
 
-@media (max-width: 768px) {
-  .shell {
-    flex-direction: column;
-  }
-
-  .shell-content {
-    padding-bottom: 56px;
-  }
-
-  .mobile-tabs {
-    display: flex;
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 52px;
-    background: var(--bg-panel);
-    border-top: 1px solid var(--border-color);
-    z-index: 45;
-  }
-
-  .mobile-tab {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 12px;
-    font-family: inherit;
-    text-decoration: none;
-    cursor: pointer;
-  }
-
-  .mobile-tab.router-link-active {
-    color: var(--accent-hover);
-  }
+.global-toast-enter-from,
+.global-toast-leave-to {
+  opacity: 0;
+  transform: translate(-50%, 8px);
 }
 </style>

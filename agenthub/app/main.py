@@ -14,7 +14,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api import agent_center, agents, mcp, runs, skills
+from app.api import (
+    agent_center,
+    agents,
+    maintenance,
+    mcp,
+    model_apis,
+    runs,
+    skills,
+    workspace,
+)
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.core.middleware import install_request_id_middleware
@@ -34,6 +43,8 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     if settings.auto_create_schema:
         await create_schema()
+    await _ensure_workspaces()
+    await _cleanup_old_runs(settings.run_retention_days)
 
     client_factory = HttpMcpClientFactory()
     broker = SSEBroker()
@@ -45,6 +56,56 @@ async def lifespan(app: FastAPI):
     finally:
         await client_factory.aclose()
         await engine.dispose()
+
+
+async def _ensure_workspaces() -> None:
+    """为已有 Agent / Skill 补齐实体工作区目录（新对象在创建时即时创建）。"""
+    from sqlalchemy import select
+
+    from app.models.agent import Agent as AgentRow
+    from app.models.skill import Skill
+    from app.services.workspace_service import ensure_agent_dir, ensure_skill_dir
+
+    try:
+        async with SessionFactory() as session:
+            agent_ids = (
+                (
+                    await session.execute(
+                        select(AgentRow.id).where(AgentRow.deleted_at.is_(None))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            skill_ids = (await session.execute(select(Skill.id))).scalars().all()
+        for agent_id in agent_ids:
+            ensure_agent_dir(agent_id)
+        for skill_id in skill_ids:
+            ensure_skill_dir(skill_id)
+        logging.getLogger(__name__).info(
+            "workspaces ready: %d agents / %d skills", len(agent_ids), len(skill_ids)
+        )
+    except Exception:  # 工作区失败不应阻断平台启动
+        logging.getLogger(__name__).exception("初始化 Agent/Skill 工作区失败")
+
+
+async def _cleanup_old_runs(retention_days: int) -> None:
+    """启动时按保留天数清理终态 Run；0 表示关闭自动清理。"""
+    if retention_days <= 0:
+        return
+    from app.services.retention_service import cleanup_runs
+
+    try:
+        async with SessionFactory() as session:
+            matched, deleted = await cleanup_runs(session, retention_days)
+        logging.getLogger(__name__).info(
+            "run retention: matched=%d deleted=%d (older than %d days)",
+            matched,
+            deleted,
+            retention_days,
+        )
+    except Exception:  # 清理失败不应阻断平台启动
+        logging.getLogger(__name__).exception("清理历史 Run 失败")
 
 
 app = FastAPI(
@@ -63,6 +124,11 @@ app.include_router(runs.router)
 app.include_router(skills.router)
 app.include_router(skills.agent_router)
 app.include_router(agent_center.router)
+app.include_router(agent_center.agent_router)
+app.include_router(model_apis.router)
+app.include_router(workspace.router)
+app.include_router(workspace.skill_router)
+app.include_router(maintenance.router)
 
 
 @app.get("/api/health", tags=["health"])

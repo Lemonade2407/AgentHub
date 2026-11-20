@@ -8,9 +8,39 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from app.core.enums import SkillCategory
+
+
+class PublicationCreate(BaseModel):
+    """发布 Agent 到 Agent Center。"""
+
+    title: str = Field(min_length=1, max_length=64)
+    summary: str = Field(default="", max_length=512)
+    category: SkillCategory = SkillCategory.GENERAL
+    version: str = Field(default="1.0.0", min_length=1, max_length=16)
+
+
+class PublicationRead(BaseModel):
+    """Publication 列表 / 详情响应（快照已脱敏）。"""
+
+    id: int
+    title: str
+    summary: str = ""
+    category: SkillCategory = SkillCategory.GENERAL
+    version: str = "1.0.0"
+    status: str
+    owner_id: int | None = None
+    owner_display_name: str | None = None
+    install_count: int = 0
+    like_count: int = 0
+    published_at: datetime | None = None
+    created_at: datetime | None = None
+    snapshot: dict[str, Any]
 
 
 class MissingSkillRead(BaseModel):

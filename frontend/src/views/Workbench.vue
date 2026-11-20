@@ -3,9 +3,19 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api, errorMessage } from '../api/http'
 import ChatComposer from '../components/ChatComposer.vue'
+import MarkdownMessage from '../components/MarkdownMessage.vue'
 import ProcessList from '../components/ProcessList.vue'
 import TracePanel from '../components/TracePanel.vue'
-import { upsertConversation, updateConversation } from '../stores/conversations'
+import {
+  appendMessage,
+  createConversation,
+  findConversationByRunId,
+  getConversation,
+  removeConversation,
+  updateConversation,
+  updateMessage,
+  type ChatMessage,
+} from '../stores/conversations'
 import type { Agent, Page, RunRead, StepRead, TraceEvent } from '../types/api'
 
 const route = useRoute()
@@ -13,9 +23,10 @@ const router = useRouter()
 
 const agents = ref<Agent[]>([])
 const agentId = ref<number | null>(null)
+// 模型是“本次对话”的选择，不再写回 Agent
+const selectedModel = ref('')
 const input = ref('')
 const maxSteps = ref<number | null>(null)
-const userText = ref('')
 const notice = ref('')
 
 const running = ref(false)
@@ -25,6 +36,7 @@ const runInfo = ref<RunRead | null>(null)
 const finalOutput = ref<string | null>(null)
 const finalError = ref<string | null>(null)
 const runStatus = ref<'running' | 'success' | 'partial' | 'failed' | 'cancelled' | null>(null)
+const activeRunId = ref<string | null>(null)
 const error = ref('')
 
 const scrollRef = ref<HTMLElement | null>(null)
@@ -37,12 +49,28 @@ const seenEvents = new Set<string>()
 const wideQuery = window.matchMedia('(min-width: 1281px)')
 const traceOpen = ref(wideQuery.matches)
 
-const currentRunId = computed(() => {
+const routeKey = computed(() => {
   const value = route.params.runId
   return Array.isArray(value) ? value[0] : value
 })
 
-const hasRun = computed(() => !!currentRunId.value)
+const conversation = computed(() => {
+  const key = routeKey.value
+  if (!key || !key.startsWith('c_')) return null
+  return getConversation(key) ?? null
+})
+const hasRun = computed(() => !!conversation.value)
+const messages = computed(() => conversation.value?.messages ?? [])
+const memoryTurns = computed(() =>
+  messages.value.reduce(
+    (count, message) =>
+      count +
+      (message.userText.trim() ? 1 : 0) +
+      (message.assistantText?.trim() ? 1 : 0),
+    0,
+  ),
+)
+const showMemoryHint = computed(() => memoryTurns.value > 20)
 const selectedAgent = computed(() => agents.value.find((agent) => agent.id === agentId.value) ?? null)
 const isRunning = computed(() => runStatus.value === 'running' || running.value)
 const showModelFix = computed(() =>
@@ -88,6 +116,7 @@ async function loadAgents() {
       agentId.value =
         agents.value.find((agent) => agent.id === stored)?.id ?? agents.value[0]?.id ?? null
     }
+    syncSelectedModel()
   } catch (e) {
     error.value = errorMessage(e, 'Agent 列表加载失败')
   }
@@ -119,7 +148,23 @@ function applyRunStatus(run: RunRead) {
   }
 }
 
-async function loadRun(runId: string) {
+function statusText(status?: string | null): string {
+  const value = (status ?? '').toUpperCase()
+  if (value === 'SUCCESS') return '成功'
+  if (value === 'PARTIAL') return '部分完成'
+  if (value === 'FAILED') return '失败'
+  if (value === 'CANCELLED') return '已取消'
+  if (value === 'RUNNING' || value === 'PENDING') return '执行中'
+  return '已结束'
+}
+
+function statusClass(status?: string | null): string {
+  const value = (status ?? '').toLowerCase()
+  if (value === 'pending') return 'running'
+  return ['success', 'partial', 'failed', 'cancelled', 'running'].includes(value) ? value : ''
+}
+
+async function loadConversation(id: string) {
   closeStream()
   loadingRun.value = true
   error.value = ''
@@ -128,32 +173,66 @@ async function loadRun(runId: string) {
   finalOutput.value = null
   finalError.value = null
   runStatus.value = null
+  activeRunId.value = null
   seenEvents.clear()
 
+  const conv = getConversation(id)
+  if (!conv) {
+    loadingRun.value = false
+    void router.replace('/chat')
+    return
+  }
+
+  agentId.value = conv.agentId
+  if (conv.model) selectedModel.value = conv.model
+
+  const entries = conv.messages.slice(-30)
   try {
-    const [run, steps] = await Promise.all([
-      api.get<RunRead>(`/api/runs/${runId}`),
-      api.get<Page<StepRead>>(`/api/runs/${runId}/steps?page_size=500`),
-    ])
-    runInfo.value = run
-    userText.value = run.input
-    input.value = ''
-    agentId.value = run.agent_id
-    events.value = steps.items.map(stepToEvent)
-    for (const event of events.value) {
-      seenEvents.add(`${event.event_type}|${event.step_no}|${event.timestamp}`)
-    }
-    applyRunStatus(run)
-    finalOutput.value = run.output ?? null
-    finalError.value = run.error_message ?? null
+    // 用后端 Run 补齐本地可能缺失的回答与状态（例如旧版本迁移的会话）
+    const runs = await Promise.all(
+      entries.map((message) =>
+        api.get<RunRead>(`/api/runs/${message.runId}`).catch(() => null),
+      ),
+    )
+    runs.forEach((run, index) => {
+      if (!run) return
+      const message = entries[index]
+      updateMessage(id, message.runId, {
+        userText: run.input || message.userText,
+        assistantText: run.output ?? message.assistantText,
+        status: run.status,
+      })
+    })
 
-    if (run.status === 'PENDING' || run.status === 'RUNNING') {
-      openStream(runId)
+    const last = entries[entries.length - 1]
+    if (last) {
+      activeRunId.value = last.runId
+      const lastRun = runs[runs.length - 1]
+      if (lastRun) {
+        runInfo.value = lastRun
+        applyRunStatus(lastRun)
+        finalOutput.value = lastRun.output ?? null
+        finalError.value = lastRun.error_message ?? null
+      }
+
+      const steps = await api
+        .get<Page<StepRead>>(`/api/runs/${last.runId}/steps?page_size=500`)
+        .catch(() => null)
+      if (steps) {
+        events.value = steps.items.map(stepToEvent)
+        for (const event of events.value) {
+          seenEvents.add(`${event.event_type}|${event.step_no}|${event.timestamp}`)
+        }
+      }
+
+      if (lastRun && (lastRun.status === 'PENDING' || lastRun.status === 'RUNNING')) {
+        openStream(last.runId)
+      }
     }
 
-    if (!agents.value.some((agent) => agent.id === run.agent_id)) {
+    if (!agents.value.some((agent) => agent.id === conv.agentId)) {
       try {
-        const agent = await api.get<Agent>(`/api/agents/${run.agent_id}`)
+        const agent = await api.get<Agent>(`/api/agents/${conv.agentId}`)
         agents.value.unshift(agent)
       } catch {
         // Agent 可能已被删除，历史会话仍可查看
@@ -168,13 +247,20 @@ async function loadRun(runId: string) {
 }
 
 async function refreshRun(runId: string) {
+  const conv = conversation.value
   try {
     const run = await api.get<RunRead>(`/api/runs/${runId}`)
-    runInfo.value = run
-    applyRunStatus(run)
-    if (run.output) finalOutput.value = run.output
-    if (run.error_message) finalError.value = run.error_message
-    updateConversation(runId, { status: run.status })
+    if (runId === activeRunId.value) {
+      runInfo.value = run
+      applyRunStatus(run)
+      if (run.output) finalOutput.value = run.output
+      if (run.error_message) finalError.value = run.error_message
+    }
+    if (conv) {
+      const patch: Partial<ChatMessage> = { status: run.status }
+      if (run.output) patch.assistantText = run.output
+      updateMessage(conv.id, runId, patch)
+    }
   } catch {
     // 终态事件已提供足够信息，刷新失败不影响展示
   }
@@ -187,7 +273,7 @@ function resetSession() {
   finalOutput.value = null
   finalError.value = null
   runStatus.value = null
-  userText.value = ''
+  activeRunId.value = null
   error.value = ''
   seenEvents.clear()
 }
@@ -210,17 +296,27 @@ function handleEvent(payload: MessageEvent) {
     const stopReason = (parsed.data?.stop_reason as string) ?? ''
     finalOutput.value = (parsed.data?.output as string) ?? null
     runStatus.value = stopReason === 'MAX_STEPS' ? 'partial' : 'success'
+    saveActiveMessage(finalOutput.value, runStatus.value === 'partial' ? 'PARTIAL' : 'SUCCESS')
     closeStream()
-    if (currentRunId.value) void refreshRun(currentRunId.value)
+    if (activeRunId.value) void refreshRun(activeRunId.value)
   } else if (parsed.event_type === 'RUN_FAILED') {
     const stopReason = (parsed.data?.stop_reason as string) ?? ''
     finalOutput.value = (parsed.data?.partial_output as string) ?? null
     finalError.value =
       (parsed.data?.error_message as string) ?? stopReason ?? '执行失败'
     runStatus.value = stopReason === 'CANCELLED' ? 'cancelled' : 'failed'
+    saveActiveMessage(finalOutput.value, stopReason === 'CANCELLED' ? 'CANCELLED' : 'FAILED')
     closeStream()
-    if (currentRunId.value) void refreshRun(currentRunId.value)
+    if (activeRunId.value) void refreshRun(activeRunId.value)
   }
+}
+
+/** 把当前 Run 的最终回答写回所属会话，切换会话后仍可看到。 */
+function saveActiveMessage(assistantText: string | null, status: string) {
+  const conv = conversation.value
+  const runId = activeRunId.value
+  if (!conv || !runId) return
+  updateMessage(conv.id, runId, { assistantText, status })
 }
 
 function openStream(runId: string) {
@@ -247,26 +343,41 @@ function closeStream() {
 
 // ---------- 交互 ----------
 
+function syncSelectedModel() {
+  // 模型不再绑定在 Agent 上，沿用用户在对话窗口上一次的选择
+  selectedModel.value = localStorage.getItem('agenthub.lastModel') ?? ''
+}
+
 function onAgentChange(id: number) {
+  const changed = agentId.value != null && agentId.value !== id
   agentId.value = id
   localStorage.setItem('agenthub.lastAgent', String(id))
-  if (hasRun.value) {
-    router.push('/chat')
+  syncSelectedModel()
+  // 切换 Agent 意味着换一个上下文：自动回到新建对话，不把新 Agent 的回复写入当前会话
+  if (changed && hasRun.value) {
+    showNotice('已切换 Agent，开始新对话')
+    void router.push('/chat')
     resetSession()
   }
 }
 
-async function onModelChange(model: string) {
-  const agent = selectedAgent.value
-  if (!agent || model === agent.model) return
-  try {
-    const updated = await api.put<Agent>(`/api/agents/${agent.id}`, { model })
-    const index = agents.value.findIndex((item) => item.id === updated.id)
-    if (index >= 0) agents.value[index] = updated
-    showNotice(`已更新「${updated.name}」的模型：${updated.model}`)
-  } catch (e) {
-    error.value = errorMessage(e, '模型切换失败')
+function onModelChange(model: string) {
+  selectedModel.value = model
+  localStorage.setItem('agenthub.lastModel', model)
+  showNotice(`本次对话将使用模型：${model}`)
+}
+
+function buildHistory(items: ChatMessage[]) {
+  const turns: { role: 'user' | 'assistant'; content: string }[] = []
+  for (const message of items) {
+    if (message.userText.trim()) {
+      turns.push({ role: 'user', content: message.userText })
+    }
+    if (message.assistantText?.trim()) {
+      turns.push({ role: 'assistant', content: message.assistantText })
+    }
   }
+  return turns.slice(-20)
 }
 
 async function send() {
@@ -276,38 +387,64 @@ async function send() {
   }
   const text = input.value.trim()
   if (!text || isRunning.value) return
+  const model = selectedModel.value || ''
+  if (!model) {
+    error.value = '请先选择模型'
+    return
+  }
 
   error.value = ''
   finalOutput.value = null
   finalError.value = null
   events.value = []
   seenEvents.clear()
-  userText.value = text
   runStatus.value = 'running'
   running.value = true
   const sent = text
   input.value = ''
 
+  let createdId: string | null = null
   try {
+    const existing = conversation.value
+    const target =
+      existing ??
+      createConversation({
+        agentId: agentId.value,
+        agentName: selectedAgent.value?.name ?? `Agent ${agentId.value}`,
+        model,
+        title: sent,
+      })
+    if (!existing) {
+      createdId = target.id
+    } else {
+      updateConversation(target.id, {
+        agentName: selectedAgent.value?.name ?? target.agentName,
+        model,
+        updatedAt: new Date().toISOString(),
+      })
+    }
+
     const run = await api.post<RunRead>(`/api/agents/${agentId.value}/runs`, {
       input: sent,
       max_steps: maxSteps.value ?? undefined,
+      model,
+      history: existing ? buildHistory(existing.messages) : [],
     })
     runInfo.value = run
-    upsertConversation({
+    activeRunId.value = run.id
+    appendMessage(target.id, {
       runId: run.id,
-      agentId: run.agent_id,
-      agentName: selectedAgent.value?.name ?? `Agent ${run.agent_id}`,
-      model: selectedAgent.value?.model ?? '',
-      title: sent.slice(0, 48),
-      createdAt: new Date().toISOString(),
+      userText: sent,
+      assistantText: null,
       status: run.status,
+      createdAt: new Date().toISOString(),
     })
-    if (currentRunId.value !== run.id) {
-      await router.push(`/chat/${run.id}`)
+    if (routeKey.value !== target.id) {
+      await router.push(`/chat/${target.id}`)
     }
     openStream(run.id)
   } catch (e) {
+    if (createdId) removeConversation(createdId)
     running.value = false
     runStatus.value = null
     error.value = errorMessage(e, '创建任务失败')
@@ -319,13 +456,33 @@ function onWideChange(event: MediaQueryListEvent) {
   if (!event.matches) traceOpen.value = false
 }
 
-watch(currentRunId, (runId) => {
-  if (!runId) {
+watch(routeKey, (key, previous) => {
+  if (key === previous) return
+  if (!key) {
     resetSession()
     return
   }
-  if (runId === runInfo.value?.id) return
-  void loadRun(runId)
+
+  const convId = key.startsWith('c_') ? key : findConversationByRunId(key)?.id ?? null
+  if (!convId) {
+    error.value = '会话不存在或已被删除'
+    void router.replace('/chat')
+    return
+  }
+  if (convId !== key) {
+    void router.replace(`/chat/${convId}`)
+    return
+  }
+
+  // 刚在当前会话发起的新 Run：消息已追加，无需重新加载
+  const conv = getConversation(convId)
+  if (
+    activeRunId.value &&
+    conv?.messages.some((message) => message.runId === activeRunId.value)
+  ) {
+    return
+  }
+  void loadConversation(convId)
 })
 
 watch(
@@ -338,15 +495,25 @@ watch(
 onMounted(async () => {
   wideQuery.addEventListener('change', onWideChange)
   await loadAgents()
-  if (currentRunId.value) {
-    await loadRun(currentRunId.value)
-  } else {
-    const queryAgent = Number(route.query.agent)
-    if (queryAgent && agents.value.some((agent) => agent.id === queryAgent)) {
-      agentId.value = queryAgent
+
+  const key = routeKey.value
+  if (key) {
+    const convId = key.startsWith('c_') ? key : findConversationByRunId(key)?.id ?? null
+    if (!convId) {
+      await router.replace('/chat')
+    } else if (convId !== key) {
+      await router.replace(`/chat/${convId}`)
+    } else {
+      await loadConversation(convId)
     }
-    void nextTick(() => composerRef.value?.focus())
+    return
   }
+
+  const queryAgent = Number(route.query.agent)
+  if (queryAgent && agents.value.some((agent) => agent.id === queryAgent)) {
+    agentId.value = queryAgent
+  }
+  void nextTick(() => composerRef.value?.focus())
 })
 
 onUnmounted(() => {
@@ -362,7 +529,9 @@ onUnmounted(() => {
       <header class="chat-head">
         <div class="head-info">
           <span class="head-agent">{{ selectedAgent?.name ?? '工作台' }}</span>
-          <span v-if="selectedAgent" class="head-model">{{ selectedAgent.model }}</span>
+          <span v-if="selectedAgent" class="head-model">
+            {{ selectedModel || '对话时选择模型' }}
+          </span>
         </div>
         <div class="head-actions">
           <button class="btn btn-sm" type="button" @click="traceOpen = !traceOpen">
@@ -387,7 +556,7 @@ onUnmounted(() => {
           ref="composerRef"
           :agents="agents"
           :agent-id="agentId"
-          :model="selectedAgent?.model ?? ''"
+          :model="selectedModel"
           :input="input"
           :max-steps="maxSteps"
           :running="isRunning"
@@ -405,57 +574,67 @@ onUnmounted(() => {
       <template v-else>
         <div ref="scrollRef" class="chat-scroll">
           <div class="thread">
-            <div class="msg user">
-              <div class="bubble">{{ userText || runInfo?.input || '' }}</div>
-            </div>
-
-            <div class="msg assistant">
-              <div class="assistant-line">
-                <span class="assistant-avatar">A</span>
-                <span class="assistant-name">{{ selectedAgent?.name ?? 'Agent' }}</span>
-                <span v-if="runInfo" class="assistant-run">{{ runInfo.id }}</span>
+            <template v-for="message in messages" :key="message.runId">
+              <div class="msg user">
+                <div class="bubble">{{ message.userText }}</div>
               </div>
 
-              <div v-if="loadingRun" class="thinking">
-                <span class="pulse"></span>加载会话…
-              </div>
-
-              <template v-else>
-                <div v-if="isRunning && !events.length" class="thinking">
-                  <span class="pulse"></span>Agent 正在思考…
-                </div>
-
-                <ProcessList :events="events" />
-
-                <div v-if="finalOutput" class="answer">{{ finalOutput }}</div>
-
-                <div v-if="finalError" class="error-box answer-error">
-                  <span>{{ finalError }}</span>
-                  <router-link v-if="showModelFix" to="/settings/models">去配置模型</router-link>
-                </div>
-
-                <div v-if="error" class="error-box answer-error">{{ error }}</div>
-
-                <div v-if="runInfo && !isRunning" class="run-meta">
-                  <span class="badge" :class="runStatus ?? ''">
-                    {{
-                      runStatus === 'success'
-                        ? '成功'
-                        : runStatus === 'partial'
-                          ? '部分完成'
-                          : runStatus === 'failed'
-                            ? '失败'
-                            : runStatus === 'cancelled'
-                              ? '已取消'
-                              : runInfo.status
-                    }}
+              <div class="msg assistant">
+                <div class="assistant-line">
+                  <span class="assistant-avatar">A</span>
+                  <span class="assistant-name">
+                    {{ conversation?.agentName ?? selectedAgent?.name ?? 'Agent' }}
                   </span>
-                  <span>{{ runInfo.llm_calls }} 次 LLM</span>
-                  <span>{{ runInfo.tool_calls }} 次工具</span>
-                  <span>{{ runInfo.step_count }} 步</span>
+                  <span class="assistant-run">{{ message.runId }}</span>
                 </div>
-              </template>
-            </div>
+
+                <template v-if="message.runId === activeRunId">
+                  <div v-if="loadingRun" class="thinking">
+                    <span class="pulse"></span>加载会话…
+                  </div>
+
+                  <template v-else>
+                    <div v-if="isRunning && !events.length" class="thinking">
+                      <span class="pulse"></span>Agent 正在思考…
+                    </div>
+
+                    <ProcessList :events="events" />
+
+                    <MarkdownMessage v-if="finalOutput" class="answer" :content="finalOutput" />
+
+                    <div v-if="finalError" class="error-box answer-error">
+                      <span>{{ finalError }}</span>
+                      <router-link v-if="showModelFix" to="/settings/models">去配置模型</router-link>
+                    </div>
+
+                    <div v-if="error" class="error-box answer-error">{{ error }}</div>
+
+                    <div v-if="runInfo && !isRunning" class="run-meta">
+                      <span class="badge" :class="runStatus ?? ''">
+                        {{ statusText(runStatus) }}
+                      </span>
+                      <span>{{ runInfo.llm_calls }} 次 LLM</span>
+                      <span>{{ runInfo.tool_calls }} 次工具</span>
+                      <span>{{ runInfo.step_count }} 步</span>
+                    </div>
+                  </template>
+                </template>
+
+                <template v-else>
+                  <MarkdownMessage
+                    v-if="message.assistantText"
+                    class="answer"
+                    :content="message.assistantText"
+                  />
+                  <div v-else class="thinking">该轮回答未保存到本地</div>
+                  <div class="run-meta">
+                    <span class="badge" :class="statusClass(message.status)">
+                      {{ statusText(message.status) }}
+                    </span>
+                  </div>
+                </template>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -464,7 +643,7 @@ onUnmounted(() => {
             ref="composerRef"
             :agents="agents"
             :agent-id="agentId"
-            :model="selectedAgent?.model ?? ''"
+            :model="selectedModel"
             :input="input"
             :max-steps="maxSteps"
             :running="isRunning"
@@ -475,6 +654,9 @@ onUnmounted(() => {
             @send="send"
           />
           <p class="composer-tip">执行过程可在右侧面板对照查看，全程不刷新页面。</p>
+          <p v-if="showMemoryHint" class="memory-hint">
+            对话记忆已超过 20 条，建议打开新的对话。
+          </p>
         </div>
       </template>
 
@@ -722,6 +904,14 @@ onUnmounted(() => {
   margin: 6px auto 0;
   font-size: 10.5px;
   color: var(--text-muted);
+  text-align: center;
+}
+
+.memory-hint {
+  width: min(760px, 100%);
+  margin: 4px auto 0;
+  font-size: 11px;
+  color: var(--warn);
   text-align: center;
 }
 

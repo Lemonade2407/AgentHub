@@ -31,13 +31,25 @@ def _fernet(secret_key: str) -> Fernet:
     return Fernet(base64.urlsafe_b64encode(digest))
 
 
+def _resolve_secret_key(explicit: str | None) -> str:
+    if explicit is not None:
+        return explicit
+    env_key = os.getenv("SECRET_KEY", "")
+    if env_key:
+        return env_key
+    # .env 由 pydantic-settings 读取，但不自动写入 os.environ；这里兜底。
+    from app.core.config import get_settings
+
+    return get_settings().secret_key
+
+
 def encrypt_secret(plaintext: str, *, secret_key: str | None = None) -> str:
     """加密明文密钥，返回 Fernet 密文（urlsafe-base64 字符串）。
 
-    `secret_key` 缺省时读取环境变量 `SECRET_KEY`；缺失即抛 `SecretDecryptError`，
-    因为"静默存明文"比直接失败更糟。
+    `secret_key` 缺省时读取环境变量 `SECRET_KEY`（或 `.env`）；缺失即抛
+    `SecretDecryptError`，因为“静默存明文”比直接失败更糟。
     """
-    key = secret_key if secret_key is not None else os.getenv("SECRET_KEY", "")
+    key = _resolve_secret_key(secret_key)
     if not key:
         raise SecretDecryptError("缺少 SECRET_KEY 环境变量，无法加密模型 API Key")
     return _fernet(key).encrypt(plaintext.encode("utf-8")).decode("ascii")
@@ -45,7 +57,7 @@ def encrypt_secret(plaintext: str, *, secret_key: str | None = None) -> str:
 
 def decrypt_secret(cipher: str, *, secret_key: str | None = None) -> str:
     """解密 Fernet 密文。任何失败统一抛 `SecretDecryptError`，不泄露细节。"""
-    key = secret_key if secret_key is not None else os.getenv("SECRET_KEY", "")
+    key = _resolve_secret_key(secret_key)
     if not key:
         raise SecretDecryptError("缺少 SECRET_KEY 环境变量，无法解密模型 API Key")
     try:

@@ -28,46 +28,57 @@ class ModelCredentialResolver:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def resolve(self, agent_id: int) -> ModelCredential | None:
+    async def resolve(
+        self, agent_id: int, *, model_override: str | None = None
+    ) -> ModelCredential | None:
         columns = await self._agent_columns()
         if "model_api_id" not in columns or "model_key" not in columns:
             return None
 
         row = (
             await self._session.execute(
-                text("SELECT model_api_id, model_key FROM agent WHERE id = :agent_id"),
+                text(
+                    "SELECT model_api_id, model_key, model FROM agent WHERE id = :agent_id"
+                ),
                 {"agent_id": agent_id},
             )
         ).first()
-        if row is None or row[0] is None or not row[1]:
+        if row is None:
             return None
-        model_api_id, model_key = int(row[0]), str(row[1])
 
-        api = await self._session.get(ModelApi, model_api_id)
-        if api is None or not api.enabled:
-            raise AppError(
-                "MODEL_NOT_AVAILABLE",
-                "Agent 引用的 Model API 不存在或已禁用，请重新选择模型",
-                http_status=409,
-                detail={"model_api_id": model_api_id},
-            )
+        explicit_api_id = int(row[0]) if row[0] is not None else None
+        explicit_model_key = str(row[1]) if row[1] else None
+        api: ModelApi | None = None
+        model: ModelApiModel | None = None
 
-        model = (
-            await self._session.execute(
-                select(ModelApiModel).where(
-                    ModelApiModel.model_api_id == model_api_id,
-                    ModelApiModel.model_key == model_key,
-                    ModelApiModel.enabled.is_(True),
+        if model_override:
+            # 对话窗口选择的模型优先；匹配不到 Model API 时回落 V1 环境变量路径
+            api, model = await self._match_legacy_model(model_override)
+            if api is None or model is None:
+                return None
+        elif explicit_api_id is not None and explicit_model_key:
+            api = await self._session.get(ModelApi, explicit_api_id)
+            if api is None or not api.enabled:
+                raise AppError(
+                    "MODEL_NOT_AVAILABLE",
+                    "Agent 引用的 Model API 不存在或已禁用，请重新选择模型",
+                    http_status=409,
+                    detail={"model_api_id": explicit_api_id},
                 )
-            )
-        ).scalar_one_or_none()
-        if model is None:
-            raise AppError(
-                "MODEL_NOT_AVAILABLE",
-                f"模型 {model_key} 不在该 Model API 的可用清单中",
-                http_status=409,
-                detail={"model_api_id": model_api_id, "model_key": model_key},
-            )
+            model = await self._find_model(api.id, explicit_model_key)
+            if model is None:
+                raise AppError(
+                    "MODEL_NOT_AVAILABLE",
+                    f"模型 {explicit_model_key} 不在该 Model API 的可用清单中",
+                    http_status=409,
+                    detail={"model_api_id": explicit_api_id, "model_key": explicit_model_key},
+                )
+        else:
+            # 兼容 V1 Agent：model 字符串形如 provider/model_key。
+            # 若用户已经配置了匹配的 Model API，则优先走 V2 凭据链路。
+            api, model = await self._match_legacy_model(str(row[2] or ""))
+            if api is None or model is None:
+                return None
 
         try:
             api_key = decrypt_secret(api.api_key_cipher)
@@ -76,7 +87,7 @@ class ModelCredentialResolver:
                 "SECRET_DECRYPT_FAILED",
                 "模型 API Key 解密失败，请重新保存密钥",
                 http_status=500,
-                detail={"model_api_id": model_api_id},
+                detail={"model_api_id": api.id},
             ) from exc
 
         capabilities: dict[str, Any] = model.capabilities or {}
@@ -96,8 +107,43 @@ class ModelCredentialResolver:
                 exc.code,
                 exc.message,
                 http_status=400,
-                detail={"model_api_id": model_api_id},
+                detail={"model_api_id": api.id},
             ) from exc
+
+    async def _find_model(self, api_id: int, model_key: str) -> ModelApiModel | None:
+        return (
+            await self._session.execute(
+                select(ModelApiModel).where(
+                    ModelApiModel.model_api_id == api_id,
+                    ModelApiModel.model_key == model_key,
+                    ModelApiModel.enabled.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+
+    async def _match_legacy_model(
+        self, model_label: str
+    ) -> tuple[ModelApi | None, ModelApiModel | None]:
+        provider, sep, model_key = model_label.partition("/")
+        if not sep or not provider or not model_key:
+            return None, None
+        row = (
+            await self._session.execute(
+                select(ModelApi, ModelApiModel)
+                .join(ModelApiModel, ModelApiModel.model_api_id == ModelApi.id)
+                .where(
+                    ModelApi.provider == provider,
+                    ModelApiModel.model_key == model_key,
+                    ModelApi.enabled.is_(True),
+                    ModelApiModel.enabled.is_(True),
+                )
+                .order_by(ModelApi.is_default.desc(), ModelApi.id)
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None, None
+        return row[0], row[1]
 
     async def _agent_columns(self) -> set[str]:
         return set(

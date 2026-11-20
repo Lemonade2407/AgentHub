@@ -81,7 +81,7 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
           @click="choose(agent)"
         >
           <span class="option-name">{{ agent.name }}</span>
-          <span class="option-hint">{{ agent.model }}</span>
+          <span class="option-hint">{{ agent.model || '对话时选择模型' }}</span>
         </button>
         <p v-if="!filtered.length" class="picker-empty">还没有 Agent</p>
       </div>

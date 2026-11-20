@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from app.core.enums import RunStatus, StepStatus, StopReason, TraceEventType
 
 
+class ChatHistoryItem(BaseModel):
+    """对话记忆中的一轮历史消息（仅文本，不含工具中间结果）。"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20000)
+
+
 class RunCreateRequest(BaseModel):
     input: str = Field(min_length=1, max_length=10000)
     max_steps: int | None = Field(default=None, ge=1, le=20)
+    # 运行时选择的模型（provider/model_key）；不传则回落 Agent 的兼容字段
+    model: str | None = Field(default=None, max_length=128)
+    # 最近对话记忆，最多 20 条（user/assistant 各算一条）
+    history: list[ChatHistoryItem] = Field(default_factory=list, max_length=20)
 
 
 class RunRead(BaseModel):

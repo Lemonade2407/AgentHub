@@ -91,7 +91,9 @@ class FakeMcpClient:
             raise self.list_error
         return list(self.tools)
 
-    async def call_tool(self, remote_name: str, arguments: dict) -> McpCallResult:
+    async def call_tool(
+        self, remote_name: str, arguments: dict, meta: dict | None = None
+    ) -> McpCallResult:
         self.call_arguments.append((remote_name, arguments))
         if self.delay_s:
             await asyncio.sleep(self.delay_s)

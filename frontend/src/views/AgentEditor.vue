@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api, errorMessage } from '../api/http'
-import ModelSelector from '../components/ModelSelector.vue'
+import { api, errorMessage, formatBytes, formatDateTime } from '../api/http'
 import PublishDialog from '../components/PublishDialog.vue'
 import RunPanel from '../components/RunPanel.vue'
+import ToggleSwitch from '../components/ToggleSwitch.vue'
+import { showNotice } from '../stores/ui'
 import { DOCUMENT_ACCEPT, extractDocumentText } from '../utils/document-text'
-import type { Agent } from '../types/api'
+import { loadDocxHtml } from '../utils/docx-preview'
+import type { Agent, WorkspaceFile } from '../types/api'
 import {
   riskLevelLabel,
   statusLabel,
@@ -16,13 +18,13 @@ import {
   type ToolDefinition,
 } from '../types/skill'
 
-type TabKey = 'basic' | 'model' | 'skills' | 'tools' | 'debug'
+type TabKey = 'basic' | 'skills' | 'tools' | 'files' | 'debug'
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'basic', label: '基础' },
-  { key: 'model', label: '模型' },
   { key: 'skills', label: 'Skills' },
   { key: 'tools', label: '工具' },
+  { key: 'files', label: '文件管理' },
   { key: 'debug', label: '调试' },
 ]
 
@@ -45,7 +47,6 @@ const activeTab = ref<TabKey>('basic')
 const form = ref({
   name: '',
   description: '',
-  model: 'deepseek/deepseek-chat',
   system_prompt: '',
   max_steps: 8,
   enabled: true,
@@ -88,6 +89,208 @@ const skillContributedTools = computed(() => {
   return map
 })
 
+function tabLabel(key: TabKey, label: string): string {
+  if (key === 'skills' && agentSkills.value.length) {
+    return `${label} (${agentSkills.value.length})`
+  }
+  if (key === 'files' && workspaceFiles.value.length) {
+    return `${label} (${workspaceFiles.value.length})`
+  }
+  return label
+}
+
+// Agent 专属工作区文件
+const workspaceFiles = ref<WorkspaceFile[]>([])
+const workspaceLoading = ref(false)
+const workspaceUploading = ref(false)
+const workspaceMsg = ref('')
+const workspaceInput = ref<HTMLInputElement | null>(null)
+
+async function loadWorkspaceFiles() {
+  if (!isEdit.value) return
+  workspaceLoading.value = true
+  try {
+    workspaceFiles.value = await api.get<WorkspaceFile[]>(`/api/agents/${rawId.value}/files`)
+  } catch (e) {
+    workspaceMsg.value = errorMessage(e, '文件列表加载失败')
+  } finally {
+    workspaceLoading.value = false
+  }
+}
+
+async function onWorkspaceSelected(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files ?? [])
+  input.value = ''
+  if (!files.length) return
+
+  workspaceUploading.value = true
+  workspaceMsg.value = ''
+  try {
+    for (const file of files) {
+      await api.upload<WorkspaceFile>(`/api/agents/${rawId.value}/files`, file)
+    }
+    workspaceMsg.value = `已上传 ${files.length} 个文件`
+    await loadWorkspaceFiles()
+  } catch (e) {
+    workspaceMsg.value = errorMessage(e, '上传失败')
+  } finally {
+    workspaceUploading.value = false
+  }
+}
+
+async function removeWorkspaceFile(name: string) {
+  if (!window.confirm(`确定删除工作区文件「${name}」？`)) return
+  workspaceMsg.value = ''
+  try {
+    await api.del(`/api/agents/${rawId.value}/files/${encodeURIComponent(name)}`)
+    workspaceMsg.value = '已删除'
+    await loadWorkspaceFiles()
+  } catch (e) {
+    workspaceMsg.value = errorMessage(e, '删除失败')
+  }
+}
+
+function workspaceFileUrl(name: string): string {
+  return `/api/agents/${rawId.value}/files/${encodeURIComponent(name)}`
+}
+
+// PDF / Word 预览
+const previewFile = ref<WorkspaceFile | null>(null)
+const previewHtml = ref('')
+const previewLoading = ref(false)
+const previewError = ref('')
+const previewUrl = computed(() =>
+  previewFile.value ? workspaceFileUrl(previewFile.value.name) : '',
+)
+const previewIsPdf = computed(() =>
+  previewFile.value ? isPdf(previewFile.value.name) : false,
+)
+const previewIsWord = computed(() =>
+  previewFile.value ? isWord(previewFile.value.name) : false,
+)
+
+function isPdf(name: string): boolean {
+  return name.toLowerCase().endsWith('.pdf')
+}
+
+function isWord(name: string): boolean {
+  return name.toLowerCase().endsWith('.docx')
+}
+
+async function openPreview(file: WorkspaceFile) {
+  if (!isPdf(file.name) && !isWord(file.name)) return
+  previewFile.value = file
+  previewHtml.value = ''
+  previewError.value = ''
+
+  if (!isWord(file.name)) return
+  previewLoading.value = true
+  try {
+    previewHtml.value = await loadDocxHtml(workspaceFileUrl(file.name))
+  } catch (e) {
+    previewError.value = errorMessage(e, 'Word 预览加载失败')
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+function closePreview() {
+  previewFile.value = null
+  previewHtml.value = ''
+  previewError.value = ''
+}
+
+// 生成并下载 DOCX
+const docOpen = ref(false)
+const docTitle = ref('')
+const docContent = ref('')
+const docAuthor = ref('')
+const docGenerating = ref(false)
+const docMsg = ref('')
+
+function openDocDialog() {
+  docTitle.value = `${form.value.name || '示例'}文档`
+  docAuthor.value = 'AgentHub'
+  docContent.value = [
+    '# 一级标题',
+    '',
+    '## 二级标题',
+    '',
+    '这是正文段落，用于验证首行缩进、字体与字号。',
+    '',
+    '- 列表项一',
+    '- 列表项二',
+  ].join('\n')
+  docMsg.value = ''
+  docOpen.value = true
+}
+
+function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1])
+    } catch {
+      return encoded[1]
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header)
+  return plain ? plain[1] : null
+}
+
+async function generateAndDownloadDocx() {
+  if (!docTitle.value.trim() || !docContent.value.trim()) {
+    docMsg.value = '请填写文档标题和正文'
+    return
+  }
+
+  docGenerating.value = true
+  docMsg.value = ''
+  try {
+    const resp = await fetch(`/api/agents/${rawId.value}/documents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: docTitle.value.trim(),
+        content: docContent.value,
+        author: docAuthor.value.trim(),
+        format: 'docx',
+      }),
+    })
+    if (!resp.ok) {
+      let message = `HTTP ${resp.status}`
+      try {
+        const body = await resp.json()
+        if (body?.message) message = body.message
+      } catch {
+        // 非 JSON 错误响应，保留状态码提示
+      }
+      throw new Error(message)
+    }
+
+    const blob = await resp.blob()
+    const filename = filenameFromDisposition(resp.headers.get('Content-Disposition')) || 'document.docx'
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+
+    docOpen.value = false
+    workspaceMsg.value = `已生成并开始下载：${filename}`
+    await loadWorkspaceFiles()
+  } catch (e) {
+    docMsg.value = errorMessage(e, '文档生成失败')
+  } finally {
+    docGenerating.value = false
+  }
+}
+
 
 async function loadAgent() {
   if (!isEdit.value) return
@@ -98,7 +301,6 @@ async function loadAgent() {
     form.value = {
       name: agent.name,
       description: agent.description ?? '',
-      model: agent.model,
       system_prompt: agent.system_prompt,
       max_steps: agent.max_steps,
       enabled: agent.enabled,
@@ -271,32 +473,22 @@ async function save() {
     activeTab.value = 'basic'
     return
   }
-  if (!form.value.model.trim()) {
-    error.value = '请选择或填写模型'
-    activeTab.value = 'model'
-    return
-  }
 
   saving.value = true
   try {
     if (!isEdit.value) {
-      const created = await api.post<Agent>('/api/agents', {
+      await api.post<Agent>('/api/agents', {
         name: form.value.name,
         description: form.value.description || null,
-        model: form.value.model,
         system_prompt: form.value.system_prompt,
         max_steps: form.value.max_steps,
         enabled: form.value.enabled,
         tool_ids: form.value.tool_ids,
       })
-      successMsg.value = '新建成功'
-      await router.replace(`/agents/${created.id}`)
-      await loadAgentSkills()
     } else {
       await api.put<Agent>(`/api/agents/${rawId.value}`, {
         name: form.value.name,
         description: form.value.description || null,
-        model: form.value.model,
         system_prompt: form.value.system_prompt,
         max_steps: form.value.max_steps,
         enabled: form.value.enabled,
@@ -305,8 +497,9 @@ async function save() {
         tool_ids: form.value.tool_ids,
       })
       form.value.tool_ids = [...updated.tool_ids]
-      successMsg.value = '保存成功'
     }
+    showNotice('保存成功')
+    await router.push('/agents')
   } catch (e) {
     error.value = errorMessage(e, '保存失败')
   } finally {
@@ -327,6 +520,7 @@ onMounted(() => {
   loadAgent()
   loadTools()
   loadAgentSkills()
+  loadWorkspaceFiles()
 })
 </script>
 
@@ -362,7 +556,7 @@ onMounted(() => {
           type="button"
           @click="activeTab = tab.key"
         >
-          {{ tab.label }}
+          {{ tabLabel(tab.key, tab.label) }}
         </button>
       </nav>
 
@@ -377,6 +571,10 @@ onMounted(() => {
           <span>描述</span>
           <input v-model="form.description" type="text" maxlength="512" />
         </label>
+
+        <p class="field-hint">
+          模型不绑定在 Agent 上：Agent 只保存 Prompt、Skills 和工具，运行时在对话窗口选择模型。
+        </p>
 
         <div class="row">
           <div class="row-head">
@@ -408,25 +606,12 @@ onMounted(() => {
         </label>
 
         <div class="row enable-block">
-          <label class="switch-row">
+          <div class="switch-row">
             <span>启用 Agent</span>
-            <input v-model="form.enabled" type="checkbox" />
-            <small class="field-hint">停用后不能发起新任务，配置和历史记录保留</small>
-          </label>
-        </div>
-      </div>
-
-      <!-- 模型 -->
-      <div v-show="activeTab === 'model'" class="panel-body">
-        <div class="row">
-          <div class="row-head">
-            <span>模型标识</span>
-            <ModelSelector :model-value="form.model" @update:model-value="form.model = $event" />
+            <ToggleSwitch v-model="form.enabled" />
+            <small class="field-hint">停用后不能发起新任务，工作台不会再显示该 Agent，配置和历史记录保留</small>
           </div>
-          <input v-model="form.model" type="text" maxlength="128" placeholder="例如：deepseek/deepseek-chat" required />
         </div>
-
-        <router-link to="/settings/models" class="btn">管理模型 API</router-link>
       </div>
 
       <!-- Skills -->
@@ -533,6 +718,75 @@ onMounted(() => {
         <p v-else class="muted">还没有工具，请先在 MCP Hub 注册 Server 并发现工具。</p>
       </div>
 
+      <!-- 文件管理 -->
+      <div v-show="activeTab === 'files'" class="panel-body">
+        <template v-if="isEdit">
+          <div class="row-head">
+            <span>Agent 专属工作区</span>
+            <div class="workspace-ops">
+              <button class="btn btn-sm" type="button" @click="openDocDialog">生成 DOCX</button>
+              <button
+                class="btn btn-sm"
+                type="button"
+                :disabled="workspaceUploading"
+                @click="workspaceInput?.click()"
+              >
+                {{ workspaceUploading ? '上传中…' : '上传文件' }}
+              </button>
+              <input
+                ref="workspaceInput"
+                type="file"
+                multiple
+                hidden
+                @change="onWorkspaceSelected"
+              />
+            </div>
+          </div>
+          <p class="field-hint">
+            文件保存在服务器该 Agent 的专属目录中，支持上传、预览/下载与删除，单个文件不超过 20MB。
+          </p>
+          <p v-if="workspaceMsg" class="ok">{{ workspaceMsg }}</p>
+
+          <p v-if="workspaceLoading" class="muted">加载中…</p>
+          <div v-else-if="workspaceFiles.length" class="file-list">
+            <div v-for="file in workspaceFiles" :key="file.name" class="file-item">
+              <div class="file-main">
+                <a
+                  :href="workspaceFileUrl(file.name)"
+                  target="_blank"
+                  rel="noopener"
+                  class="file-name"
+                >
+                  {{ file.name }}
+                </a>
+                <span class="muted">
+                  {{ formatBytes(file.size) }} · {{ formatDateTime(file.updated_at) }}
+                </span>
+              </div>
+              <div class="file-ops">
+                <button
+                  v-if="isPdf(file.name) || isWord(file.name)"
+                  class="btn btn-sm"
+                  type="button"
+                  @click="openPreview(file)"
+                >
+                  预览
+                </button>
+                <button
+                  class="btn btn-sm btn-danger"
+                  type="button"
+                  @click="removeWorkspaceFile(file.name)"
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          </div>
+          <p v-else class="muted">还没有文件，点击「上传文件」添加。</p>
+        </template>
+        <p v-else class="muted">保存 Agent 后会自动创建专属工作区，可在此上传文件。</p>
+      </div>
+
       <!-- 调试 -->
       <div v-show="activeTab === 'debug'" class="panel-body">
         <template v-if="isEdit">
@@ -541,6 +795,61 @@ onMounted(() => {
         <p v-else class="muted">保存 Agent 后可在此直接调试运行。</p>
       </div>
     </form>
+
+    <div v-if="previewFile" class="pdf-overlay" @click.self="closePreview">
+      <div class="pdf-modal">
+        <header class="pdf-head">
+          <span class="pdf-title">{{ previewFile.name }}</span>
+          <div class="pdf-ops">
+            <a :href="previewUrl" target="_blank" rel="noopener" class="btn btn-sm">下载</a>
+            <button class="btn btn-sm" type="button" @click="closePreview">关闭</button>
+          </div>
+        </header>
+        <iframe v-if="previewIsPdf" :src="previewUrl" title="PDF 预览"></iframe>
+
+        <div v-else-if="previewIsWord" class="preview-docx">
+          <p v-if="previewLoading" class="muted preview-tip">Word 预览加载中…</p>
+          <p v-else-if="previewError" class="muted preview-tip">
+            {{ previewError }}，请下载后查看。
+          </p>
+          <div v-else class="docx-content" v-html="previewHtml"></div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="docOpen" class="pdf-overlay" @click.self="docOpen = false">
+      <div class="doc-modal">
+        <header class="pdf-head">
+          <span class="pdf-title">生成 Word 文档</span>
+          <button class="btn btn-sm" type="button" @click="docOpen = false">关闭</button>
+        </header>
+        <div class="doc-body">
+          <label class="doc-field">
+            <span>标题</span>
+            <input v-model="docTitle" type="text" maxlength="200" />
+          </label>
+          <label class="doc-field">
+            <span>作者</span>
+            <input v-model="docAuthor" type="text" maxlength="100" />
+          </label>
+          <label class="doc-field">
+            <span>正文（支持 # / ## / - 结构）</span>
+            <textarea v-model="docContent" rows="10"></textarea>
+          </label>
+          <p v-if="docMsg" class="error">{{ docMsg }}</p>
+          <div class="doc-actions">
+            <button
+              class="btn-primary"
+              type="button"
+              :disabled="docGenerating"
+              @click="generateAndDownloadDocx"
+            >
+              {{ docGenerating ? '生成中…' : '生成并下载 DOCX' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <PublishDialog
       v-if="publishOpen"
@@ -580,6 +889,225 @@ onMounted(() => {
   flex-direction: column;
   gap: 16px;
   max-width: 860px;
+}
+
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.file-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.file-ops {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.workspace-ops {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.doc-modal {
+  width: min(720px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-pop);
+}
+
+.doc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.doc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.doc-field input,
+.doc-field textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 13px;
+}
+
+.doc-field textarea {
+  min-height: 180px;
+  resize: vertical;
+  font-family: 'JetBrains Mono', Consolas, Monaco, monospace;
+  line-height: 1.6;
+}
+
+.doc-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.pdf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.pdf-modal {
+  width: min(1000px, 92vw);
+  height: min(820px, 88vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-pop);
+}
+
+.pdf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.pdf-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-ops {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.pdf-modal iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+
+.preview-docx {
+  flex: 1;
+  overflow-y: auto;
+  background: #fff;
+}
+
+.preview-tip {
+  padding: 24px;
+  text-align: center;
+}
+
+.docx-content {
+  padding: 28px 36px;
+  color: #1f2937;
+  font-family: '宋体', 'Songti SC', serif;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.docx-content :deep(h1) {
+  margin: 18px 0 8px;
+  font-family: '黑体', 'Heiti SC', sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.docx-content :deep(h2) {
+  margin: 16px 0 6px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.docx-content :deep(h3) {
+  margin: 14px 0 6px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.docx-content :deep(p) {
+  margin: 8px 0;
+  text-indent: 2em;
+}
+
+.docx-content :deep(ul),
+.docx-content :deep(ol) {
+  margin: 8px 0;
+  padding-left: 28px;
+}
+
+.docx-content :deep(li) {
+  margin: 4px 0;
+}
+
+.docx-content :deep(table) {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+}
+
+.docx-content :deep(th),
+.docx-content :deep(td) {
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  text-align: left;
+}
+
+.file-name {
+  color: var(--accent-hover);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-name:hover {
+  text-decoration: underline;
 }
 
 .row {
