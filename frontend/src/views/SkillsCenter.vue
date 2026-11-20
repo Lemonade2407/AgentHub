@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   SKILL_CATEGORIES,
   categoryLabel,
@@ -11,6 +12,7 @@ import {
 
 type Tab = 'mine' | 'center'
 
+const router = useRouter()
 const tab = ref<Tab>('mine')
 const skills = ref<Skill[]>([])
 const total = ref(0)
@@ -145,6 +147,10 @@ function iconText(skill: Skill): string {
   return (skill.icon || skill.name || '?').slice(0, 1).toUpperCase()
 }
 
+function openSkill(skill: Skill) {
+  void router.push(`/skills/${skill.id}`)
+}
+
 onMounted(load)
 </script>
 
@@ -192,7 +198,16 @@ onMounted(load)
     <p v-if="loading" class="muted">加载中…</p>
 
     <div v-if="!loading && skills.length" class="grid">
-      <article v-for="skill in skills" :key="skill.id" class="skill-card">
+      <article
+        v-for="skill in skills"
+        :key="skill.id"
+        class="skill-card clickable"
+        role="button"
+        tabindex="0"
+        @click="openSkill(skill)"
+        @keydown.enter="openSkill(skill)"
+        @keydown.space.prevent="openSkill(skill)"
+      >
         <div class="card-head">
           <span class="icon">{{ iconText(skill) }}</span>
           <div class="title">
@@ -216,7 +231,7 @@ onMounted(load)
           <span v-if="tab === 'center'">作者 {{ skill.owner_display_name || '匿名' }}</span>
         </div>
 
-        <div class="actions">
+        <div class="actions" @click.stop>
           <template v-if="tab === 'mine' || skill.owned">
             <router-link :to="`/skills/${skill.id}`" class="btn btn-sm">编辑</router-link>
             <button
@@ -287,6 +302,10 @@ onMounted(load)
 
 .skill-card:hover {
   border-color: var(--border-strong);
+}
+
+.skill-card.clickable {
+  cursor: pointer;
 }
 
 .card-head {

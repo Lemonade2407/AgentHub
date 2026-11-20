@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { api, errorMessage, formatDateTime } from '../api/http'
 import ToggleSwitch from '../components/ToggleSwitch.vue'
 import type { Agent, Page } from '../types/api'
 
+const router = useRouter()
 const agents = ref<Agent[]>([])
 const total = ref(0)
 const page = ref(1)
@@ -44,6 +46,10 @@ function goPage(next: number) {
   if (next < 1 || next > totalPages.value) return
   page.value = next
   void loadAgents()
+}
+
+function openAgent(agent: Agent) {
+  void router.push(`/agents/${agent.id}`)
 }
 
 async function removeAgent(agent: Agent) {
@@ -101,13 +107,22 @@ onMounted(loadAgents)
     <p v-if="loading" class="muted">加载中…</p>
 
     <div v-if="!loading && agents.length" class="grid">
-      <article v-for="agent in agents" :key="agent.id" class="agent-card">
+      <article
+        v-for="agent in agents"
+        :key="agent.id"
+        class="agent-card clickable"
+        role="button"
+        tabindex="0"
+        @click="openAgent(agent)"
+        @keydown.enter="openAgent(agent)"
+        @keydown.space.prevent="openAgent(agent)"
+      >
         <div class="card-head">
           <div class="title-block">
             <h3>{{ agent.name }}</h3>
             <span v-if="agent.description" class="desc">{{ agent.description }}</span>
           </div>
-          <div class="enable-control">
+          <div class="enable-control" @click.stop>
             <span class="enable-label" :class="{ on: agent.enabled }">
               {{ agent.enabled ? '启用' : '停用' }}
             </span>
@@ -128,7 +143,7 @@ onMounted(loadAgents)
 
         <div class="card-foot">
           <span class="muted time">更新于 {{ formatDateTime(agent.updated_at) }}</span>
-          <div class="ops">
+          <div class="ops" @click.stop>
             <router-link :to="`/agents/${agent.id}`" class="btn btn-sm">编辑</router-link>
             <router-link :to="`/chat?agent=${agent.id}`" class="btn btn-sm">运行</router-link>
             <button
@@ -184,6 +199,10 @@ onMounted(loadAgents)
 
 .agent-card:hover {
   border-color: var(--border-strong);
+}
+
+.agent-card.clickable {
+  cursor: pointer;
 }
 
 .card-head {

@@ -9,18 +9,10 @@ import {
   SKILL_CATEGORIES,
   parametersFromSchema,
   renderInstructions,
-  riskLevelLabel,
   statusLabel,
-  type Page,
   type Skill,
   type SkillParameterSpec,
-  type ToolDefinition,
 } from '../types/skill'
-
-interface ToolDraft {
-  tool_id: number
-  required: boolean
-}
 
 const route = useRoute()
 const router = useRouter()
@@ -46,8 +38,6 @@ const form = reactive({
 
 const SCHEMA_PLACEHOLDER = '例如：\n{\n  "type": "object",\n  "properties": {}\n}'
 
-const tools = ref<ToolDefinition[]>([])
-const toolDrafts = ref<ToolDraft[]>([])
 const skill = ref<Skill | null>(null)
 const owned = ref(true)
 
@@ -160,29 +150,11 @@ const previewText = computed(() => {
   return renderInstructions(form.instructions, values)
 })
 
-const selectedTools = computed(() => {
-  const byId = new Map(tools.value.map((tool) => [tool.id, tool]))
-  return toolDrafts.value
-    .map((draft) => ({ draft, tool: byId.get(draft.tool_id) }))
-    .filter((item): item is { draft: ToolDraft; tool: ToolDefinition } => Boolean(item.tool))
-})
-
 function failMessage(resp: Response): Promise<string> {
   return resp
     .json()
     .catch(() => null)
     .then((body) => body?.message ?? `HTTP ${resp.status}`)
-}
-
-async function loadTools() {
-  try {
-    const resp = await fetch('/api/mcp/tools?page_size=100')
-    if (!resp.ok) return
-    const data: Page<ToolDefinition> = await resp.json()
-    tools.value = data.items
-  } catch {
-    // 工具列表失败不阻断编辑器
-  }
 }
 
 async function loadSkill() {
@@ -204,10 +176,6 @@ async function loadSkill() {
     form.instructions = data.instructions
     form.tagsText = data.tags.join(', ')
     form.schemaText = JSON.stringify(data.input_schema ?? {}, null, 2)
-    toolDrafts.value = data.tools.map((tool) => ({
-      tool_id: tool.tool_id,
-      required: tool.required,
-    }))
     for (const param of parametersFromSchema(data.input_schema)) {
       if (param.default != null) previewValues[param.name] = String(param.default)
     }
@@ -263,22 +231,6 @@ async function onInstructionDocumentSelected(event: Event) {
   }
 }
 
-function isSelected(toolId: number): boolean {
-  return toolDrafts.value.some((draft) => draft.tool_id === toolId)
-}
-
-function toggleTool(tool: ToolDefinition) {
-  if (!owned.value) return
-  const index = toolDrafts.value.findIndex((draft) => draft.tool_id === tool.id)
-  if (index >= 0) toolDrafts.value.splice(index, 1)
-  else toolDrafts.value.push({ tool_id: tool.id, required: true })
-}
-
-function setRequired(toolId: number, required: boolean) {
-  const draft = toolDrafts.value.find((item) => item.tool_id === toolId)
-  if (draft) draft.required = required
-}
-
 function onParamInput(name: string, event: Event) {
   previewValues[name] = (event.target as HTMLInputElement).value
 }
@@ -297,10 +249,6 @@ function paramChecked(param: SkillParameterSpec): boolean {
   return value === true || value === 'true'
 }
 
-function onRequiredChange(toolId: number, event: Event) {
-  setRequired(toolId, (event.target as HTMLInputElement).checked)
-}
-
 function buildPayload() {
   return {
     name: form.name.trim(),
@@ -315,7 +263,6 @@ function buildPayload() {
       .split(',')
       .map((tag) => tag.trim())
       .filter(Boolean),
-    tools: toolDrafts.value,
   }
 }
 
@@ -423,7 +370,7 @@ async function exportSkill() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadTools(), loadSkill(), loadAttachments()])
+  await Promise.all([loadSkill(), loadAttachments()])
 })
 </script>
 
@@ -547,36 +494,6 @@ onMounted(async () => {
             ></textarea>
             <small v-if="parsedSchema.error" class="error">{{ parsedSchema.error }}</small>
           </label>
-
-          <div class="row">
-            <span>绑定工具 *</span>
-            <div v-if="tools.length" class="tool-list">
-              <div v-for="tool in tools" :key="tool.id" class="tool-item">
-                <label class="tool-check">
-                  <input
-                    type="checkbox"
-                    :checked="isSelected(tool.id)"
-                    :disabled="!owned"
-                    @change="toggleTool(tool)"
-                  />
-                  <code>{{ tool.qualified_name }}</code>
-                  <span class="risk" :class="tool.risk_level.toLowerCase()">{{ riskLevelLabel(tool.risk_level) }}</span>
-                  <span v-if="!tool.enabled" class="risk write">停用</span>
-                </label>
-                <label v-if="isSelected(tool.id)" class="required">
-                  <input
-                    type="checkbox"
-                    :checked="toolDrafts.find((item) => item.tool_id === tool.id)?.required"
-                    :disabled="!owned"
-                    @change="onRequiredChange(tool.id, $event)"
-                  />
-                  必填（缺失时拒绝运行）
-                </label>
-                <span class="muted desc">{{ tool.description }}</span>
-              </div>
-            </div>
-            <p v-else class="muted">还没有工具，请先在 MCP Hub 注册 Server 并发现工具。</p>
-          </div>
         </fieldset>
 
         <div v-if="owned" class="actions">
@@ -626,19 +543,7 @@ onMounted(async () => {
           <pre v-if="form.instructions.trim()" class="prompt">## Skill: {{ form.name || '未命名' }} (v{{ form.version || '1.0.0' }})
 
 {{ previewText }}</pre>
-          <p v-else class="muted">纯工具型 Skill 不占用 Prompt 预算</p>
-        </section>
-
-        <section class="preview-block">
-          <h3>本次 Skill 工具：</h3>
-          <p v-if="!selectedTools.length" class="muted">未绑定工具</p>
-          <ul v-else class="selected-tools">
-            <li v-for="item in selectedTools" :key="item.tool.id">
-              <code>{{ item.tool.qualified_name }}</code>
-              <span v-if="item.draft.required" class="badge published">必填</span>
-              <span v-if="!item.tool.enabled" class="badge archived">不可用</span>
-            </li>
-          </ul>
+          <p v-else class="muted">未填写指令片段时，Skill 不会注入 System Prompt</p>
         </section>
 
         <section class="preview-block">
@@ -788,74 +693,6 @@ textarea.instructions-input {
   font-family: inherit;
 }
 
-.tool-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 340px;
-  overflow-y: auto;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 8px;
-}
-
-.tool-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 6px;
-  border-radius: 6px;
-}
-
-.tool-item:hover {
-  background: var(--surface-muted);
-}
-
-.tool-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-}
-
-.required {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.desc {
-  flex-basis: 100%;
-  font-size: 12px;
-  padding-left: 24px;
-}
-
-.risk {
-  padding: 1px 6px;
-  border-radius: 8px;
-  font-size: 11px;
-}
-
-.risk.read_only {
-  background: var(--success-soft);
-  color: var(--success);
-}
-
-.risk.low_risk {
-  background: var(--warn-soft);
-  color: var(--warn);
-}
-
-.risk.write,
-.risk.high_risk {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
 .actions {
   display: flex;
   gap: 10px;
@@ -916,16 +753,6 @@ textarea.instructions-input {
   word-break: break-word;
   max-height: 260px;
   overflow: auto;
-}
-
-.selected-tools {
-  margin: 0;
-  padding-left: 18px;
-  font-size: 13px;
-}
-
-.selected-tools li {
-  margin-bottom: 4px;
 }
 
 .attachment-head {
