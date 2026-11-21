@@ -1,14 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api, errorMessage, isRouteMissing, relativeTime } from '../api/http'
+import PublishDialog from '../components/PublishDialog.vue'
 import { DEMO_PUBLICATIONS } from '../data/demo'
-import type { Page, Publication } from '../types/api'
+import { showNotice } from '../stores/ui'
+import type { Agent, Page, Publication } from '../types/api'
 import { SKILL_CATEGORIES, categoryLabel } from '../types/skill'
 
-type Tab = 'center' | 'mine'
+type Tab = 'agents' | 'center'
 
-const tab = ref<Tab>('center')
+const tab = ref<Tab>('agents')
+const agents = ref<Agent[]>([])
 const items = ref<Publication[]>([])
+const publishedByAgent = ref<Map<number, Publication>>(new Map())
+const publishTarget = ref<Agent | null>(null)
 const total = ref(0)
 const page = ref(1)
 const pageSize = 12
@@ -42,13 +47,33 @@ function filterDemo(): Publication[] {
 async function load() {
   loading.value = true
   error.value = ''
+
+  if (tab.value === 'agents') {
+    demoMode.value = false
+    const params = new URLSearchParams({
+      page: String(page.value),
+      page_size: String(pageSize),
+    })
+    if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
+    try {
+      const data = await api.get<Page<Agent>>(`/api/agents?${params.toString()}`)
+      agents.value = data.items
+      total.value = data.total
+    } catch (e) {
+      error.value = errorMessage(e, '我的 Agents 加载失败')
+    } finally {
+      loading.value = false
+    }
+    void loadMyPublications()
+    return
+  }
+
   const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize) })
   if (keyword.value.trim()) params.set('keyword', keyword.value.trim())
   if (category.value) params.set('category', category.value)
   if (tab.value === 'center') params.set('sort', sort.value)
 
-  const path =
-    tab.value === 'center' ? '/api/agent-center' : '/api/agent-center/mine'
+  const path = '/api/agent-center'
 
   try {
     const raw = await api.get<Publication[] | Page<Publication>>(`${path}?${params.toString()}`)
@@ -59,20 +84,52 @@ async function load() {
   } catch (e) {
     if (isRouteMissing(e)) {
       demoMode.value = true
-      if (tab.value === 'mine') {
-        items.value = []
-        total.value = 0
-      } else {
-        const list = filterDemo()
-        total.value = list.length
-        items.value = list.slice((page.value - 1) * pageSize, page.value * pageSize)
-      }
+      const list = filterDemo()
+      total.value = list.length
+      items.value = list.slice((page.value - 1) * pageSize, page.value * pageSize)
     } else {
       error.value = errorMessage(e, 'Agent Center 加载失败')
     }
   } finally {
     loading.value = false
   }
+}
+
+async function loadMyPublications() {
+  try {
+    const data = await api.get<Page<Publication>>('/api/agent-center/mine?page=1&page_size=100')
+    const map = new Map<number, Publication>()
+    for (const pub of data.items) {
+      if (pub.source_agent_id != null && pub.status === 'published') {
+        map.set(pub.source_agent_id, pub)
+      }
+    }
+    publishedByAgent.value = map
+  } catch {
+    publishedByAgent.value = new Map()
+  }
+}
+
+function publishedVersion(agentId: number): string {
+  return publishedByAgent.value.get(agentId)?.version ?? ''
+}
+
+function nextVersion(version: string): string {
+  const parts = version.split('.')
+  if (parts.length === 3 && parts.every((part) => /^\d+$/.test(part))) {
+    return `${parts[0]}.${parts[1]}.${Number(parts[2]) + 1}`
+  }
+  return version
+}
+
+function openPublish(agent: Agent) {
+  publishTarget.value = agent
+}
+
+async function onPublished() {
+  publishTarget.value = null
+  showNotice('发布成功，已出现在广场')
+  await load()
 }
 
 function switchTab(next: Tab) {
@@ -93,8 +150,8 @@ function goPage(next: number) {
   void load()
 }
 
-function initial(item: Publication): string {
-  return (item.title || '?').slice(0, 1).toUpperCase()
+function initial(text: string): string {
+  return (text || '?').slice(0, 1).toUpperCase()
 }
 
 function skillCount(item: Publication): number {
@@ -149,8 +206,8 @@ onMounted(load)
     </header>
 
     <div class="tabs">
-      <button class="tab" :class="{ active: tab === 'mine' }" type="button" @click="switchTab('mine')">
-        我的发布
+      <button class="tab" :class="{ active: tab === 'agents' }" type="button" @click="switchTab('agents')">
+        我的 Agents
       </button>
       <button class="tab" :class="{ active: tab === 'center' }" type="button" @click="switchTab('center')">
         广场
@@ -158,8 +215,8 @@ onMounted(load)
     </div>
 
     <div class="toolbar">
-      <input v-model="keyword" type="search" placeholder="搜索标题或简介" @keyup.enter="search" />
-      <select v-model="category" @change="search">
+      <input v-model="keyword" type="search" placeholder="搜索名称或简介" @keyup.enter="search" />
+      <select v-if="tab === 'center'" v-model="category" @change="search">
         <option value="">全部分类</option>
         <option v-for="item in SKILL_CATEGORIES" :key="item.value" :value="item.value">
           {{ item.label }}
@@ -180,11 +237,47 @@ onMounted(load)
     <p v-if="error" class="error-box">{{ error }}</p>
     <p v-if="loading" class="muted">加载中…</p>
 
-    <div v-if="!loading && items.length" class="grid">
+    <div v-if="!loading && tab === 'agents' && agents.length" class="grid">
+      <article v-for="agent in agents" :key="agent.id" class="pub-card">
+        <router-link :to="`/agents/${agent.id}`" class="card-main">
+          <div class="card-top">
+            <span class="icon">{{ initial(agent.name) }}</span>
+            <div class="title-block">
+              <h3>{{ agent.name }}</h3>
+              <span class="meta-line">
+                {{ agent.enabled ? '启用中' : '已停用' }} · 更新于 {{ relativeTime(agent.updated_at) }}
+              </span>
+            </div>
+            <span class="badge">{{ agent.model || '对话时选择' }}</span>
+          </div>
+
+          <p class="summary">{{ agent.description || '暂无简介' }}</p>
+
+          <div class="facts">
+            <span>{{ agent.skill_count ?? 0 }} Skill</span>
+            <span>{{ agent.tool_ids.length }} 工具</span>
+            <span>最多 {{ agent.max_steps }} 步</span>
+          </div>
+        </router-link>
+
+        <footer class="card-foot">
+          <span class="muted">ID {{ agent.id }}</span>
+          <span v-if="publishedVersion(agent.id)" class="badge">
+            已公开 v{{ publishedVersion(agent.id) }}
+          </span>
+          <button class="btn btn-sm" type="button" @click="openPublish(agent)">
+            {{ publishedVersion(agent.id) ? '再次发布' : '公开' }}
+          </button>
+          <router-link :to="`/chat?agent=${agent.id}`" class="run-link">运行 →</router-link>
+        </footer>
+      </article>
+    </div>
+
+    <div v-else-if="!loading && tab === 'center' && items.length" class="grid">
       <article v-for="item in items" :key="item.id" class="pub-card">
         <router-link :to="`/agent-center/${item.id}`" class="card-main">
           <div class="card-top">
-            <span class="icon">{{ initial(item) }}</span>
+            <span class="icon">{{ initial(item.title) }}</span>
             <div class="title-block">
               <h3>{{ item.title }}</h3>
               <span class="meta-line">{{ item.owner_display_name || '匿名' }} · v{{ item.version }}</span>
@@ -221,8 +314,8 @@ onMounted(load)
 
     <p v-else-if="!loading" class="empty">
       {{
-        tab === 'mine'
-          ? '还没有发布。打开 Agent 编辑器，点击右上角「发布」生成快照。'
+        tab === 'agents'
+          ? '还没有 Agent，去 Agents 页面新建一个。'
           : '广场暂无公开 Agent。'
       }}
     </p>
@@ -234,6 +327,18 @@ onMounted(load)
         下一页
       </button>
     </div>
+
+    <PublishDialog
+      v-if="publishTarget"
+      :agent-id="publishTarget.id"
+      :name="publishTarget.name"
+      :description="publishTarget.description"
+      :initial-version="
+        publishedVersion(publishTarget.id) ? nextVersion(publishedVersion(publishTarget.id)) : '1.0.0'
+      "
+      @close="publishTarget = null"
+      @published="onPublished"
+    />
   </section>
 </template>
 
@@ -375,6 +480,16 @@ onMounted(load)
 .like:hover,
 .like.active {
   color: var(--danger);
+}
+
+.run-link {
+  margin-left: auto;
+  color: var(--accent-hover);
+  font-size: 11.5px;
+}
+
+.run-link:hover {
+  text-decoration: underline;
 }
 
 .pager {

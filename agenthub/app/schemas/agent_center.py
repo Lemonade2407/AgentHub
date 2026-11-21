@@ -29,6 +29,7 @@ class PublicationRead(BaseModel):
     """Publication 列表 / 详情响应（快照已脱敏）。"""
 
     id: int
+    source_agent_id: int | None = None
     title: str
     summary: str = ""
     category: SkillCategory = SkillCategory.GENERAL

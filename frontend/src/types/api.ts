@@ -164,6 +164,7 @@ export interface AgentSnapshot {
 
 export interface Publication {
   id: number
+  source_agent_id?: number | null
   title: string
   summary: string
   category: string

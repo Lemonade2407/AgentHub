@@ -7,6 +7,7 @@ const props = defineProps<{
   agentId: number
   name: string
   description: string | null
+  initialVersion?: string
 }>()
 
 const emit = defineEmits<{
@@ -18,7 +19,7 @@ const form = ref({
   title: props.name,
   summary: props.description ?? '',
   category: 'general',
-  version: '1.0.0',
+  version: props.initialVersion || '1.0.0',
 })
 const saving = ref(false)
 const error = ref('')

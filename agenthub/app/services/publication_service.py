@@ -24,6 +24,7 @@ from app.agent.snapshot import (
 )
 from app.core.enums import PublicationStatus, SkillCategory
 from app.core.errors import AppError
+from app.db.models import Agent as AgentRow
 from app.db.models import McpServer
 from app.models.publication import AgentPublication, PublicationLike
 from app.models.user import AppUser
@@ -101,10 +102,23 @@ class PublicationService:
                 )
             )
 
+        # 源 Agent 已删除（软删除）时，不再在“我的发布 / 广场”中展示其旧快照
+        conditions.append(
+            or_(
+                AgentPublication.source_agent_id.is_(None),
+                AgentRow.deleted_at.is_(None),
+            )
+        )
+
         total = int(
             (
                 await self._session.execute(
-                    select(func.count()).select_from(AgentPublication).where(*conditions)
+                    select(func.count())
+                    .select_from(AgentPublication)
+                    .outerjoin(
+                        AgentRow, AgentRow.id == AgentPublication.source_agent_id
+                    )
+                    .where(*conditions)
                 )
             ).scalar_one()
         )
@@ -112,6 +126,7 @@ class PublicationService:
         stmt = (
             select(AgentPublication, AppUser.display_name)
             .outerjoin(AppUser, AppUser.id == AgentPublication.owner_id)
+            .outerjoin(AgentRow, AgentRow.id == AgentPublication.source_agent_id)
             .where(*conditions)
         )
         if sort == "popular":
@@ -397,6 +412,7 @@ class PublicationService:
     ) -> PublicationRead:
         return PublicationRead(
             id=pub.id,
+            source_agent_id=pub.source_agent_id,
             title=pub.title,
             summary=pub.summary,
             category=pub.category,  # type: ignore[arg-type]
