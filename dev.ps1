@@ -395,6 +395,18 @@ if (-not (Test-Port 8101)) {
     Write-Host 'Demo LLM already running on 8101.'
 }
 
+# 6.5) Seed demo data (idempotent; needs the local MCP servers above to discover tools)
+Write-Host 'Seeding demo data (MCP servers / Skills / Agents) ...'
+Push-Location $backendDir
+try {
+    & $python -m app.db.seed
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Seed failed with exit code $LASTEXITCODE (services keep running)."
+    }
+} finally {
+    Pop-Location
+}
+
 # 7) Open browser
 if (-not $NoBrowser) {
     Start-Process 'http://localhost:5173'
