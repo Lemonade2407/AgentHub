@@ -61,6 +61,60 @@ function New-SecretKey {
     return [Convert]::ToBase64String($bytes)
 }
 
+function Set-DotEnvValue([string]$Key, [string]$Value) {
+    $lines = @()
+    if (Test-Path $envFile) { $lines = @(Get-Content $envFile) }
+    $found = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match ("^" + [regex]::Escape($Key) + "=")) {
+            $lines[$i] = "$Key=$Value"
+            $found = $true
+        }
+    }
+    if (-not $found) { $lines += "$Key=$Value" }
+    Set-Content -Path $envFile -Value $lines -Encoding ASCII
+}
+
+function Test-DbCredentials([int]$Port) {
+    $probe = @"
+import asyncio, asyncpg
+async def m():
+    conn = await asyncio.wait_for(asyncpg.connect(host='127.0.0.1', port=$Port, user='agenthub', password='agenthub', database='agenthub'), timeout=3)
+    await conn.close()
+asyncio.run(m())
+"@
+    # PS5 下原生命令写 stderr 会触发 NativeCommandError；探测失败属预期，必须降级为 Continue
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $python -c $probe 2>&1 | Out-Null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return ($exitCode -eq 0)
+}
+
+function Start-ComposePostgres([int]$Port) {
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if ($docker -eq $null) {
+        throw "PostgreSQL is not reachable on port $Port and Docker is not installed."
+    }
+    Write-Host "Starting project PostgreSQL on 127.0.0.1:$Port ..."
+    Push-Location $root
+    try {
+        $env:AGENTHUB_DB_PORT = "$Port"
+        & $docker.Source compose up -d postgres
+    } finally {
+        Pop-Location
+    }
+    for ($i = 0; $i -lt 60; $i++) {
+        if ((Test-Port $Port) -and (Test-DbCredentials $Port)) { return }
+        Start-Sleep -Seconds 1
+    }
+    throw "PostgreSQL on 127.0.0.1:$Port did not become ready (agenthub/agenthub)."
+}
+
 function Show-LogTail([string]$Path, [int]$Lines = 40) {
     if (Test-Path $Path) {
         Write-Host "---- $Path ----"
@@ -79,6 +133,29 @@ Write-Host '== AgentHub dev launcher =='
 # 1) Python venv
 if (-not (Test-Path $python)) {
     throw "Python venv not found: $python. Create it with: cd agenthub; python -m venv .venv; .venv\Scripts\pip install -e ."
+}
+
+# 1.1) Keep venv in sync with pyproject (new deps such as cryptography must exist)
+$previous = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $python -c "import cryptography, fastapi, langgraph, sqlalchemy, asyncpg, docx, reportlab, multipart" 2>&1 | Out-Null
+    $depsCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previous
+}
+if ($depsCode -ne 0) {
+    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uv -eq $null) {
+        throw 'Backend dependencies are missing. Run: cd agenthub; uv sync --all-groups'
+    }
+    Write-Host 'Backend dependencies are out of date; running uv sync ...'
+    Push-Location $backendDir
+    try {
+        & $uv.Source sync --all-groups
+    } finally {
+        Pop-Location
+    }
 }
 
 # 2) Local .env (SECRET_KEY is required for Model API encryption)
@@ -100,23 +177,24 @@ if ($envText -notmatch '(?m)^ALLOW_PRIVATE_MCP=') {
 }
 
 # 3) PostgreSQL
-if (-not (Test-Port 5432)) {
-    $docker = Get-Command docker -ErrorAction SilentlyContinue
-    if ($docker -ne $null) {
-        Write-Host 'PostgreSQL is not running; starting docker compose postgres ...'
-        Push-Location $root
-        & $docker.Source compose up -d postgres
-        Pop-Location
-        for ($i = 0; $i -lt 60; $i++) {
-            if (Test-Port 5432) { break }
-            Start-Sleep -Seconds 1
-        }
-    }
-    if (-not (Test-Port 5432)) {
-        throw 'PostgreSQL is not listening on 127.0.0.1:5432. Start it first (docker compose up -d postgres).'
-    }
+# 优先复用 5432 上凭据可用的实例；被本机其他 PostgreSQL 占用时，项目容器回退到 5433。
+$dbPort = $null
+if (Test-DbCredentials 5432) {
+    $dbPort = 5432
+} elseif (Test-DbCredentials 5433) {
+    $dbPort = 5433
+} elseif (-not (Test-Port 5432)) {
+    Start-ComposePostgres 5432
+    $dbPort = 5432
+} elseif (-not (Test-Port 5433)) {
+    Write-Host 'Port 5432 is occupied by another PostgreSQL instance; using 5433 for the project database.'
+    Start-ComposePostgres 5433
+    $dbPort = 5433
+} else {
+    throw 'Ports 5432/5433 are occupied but neither accepts agenthub/agenthub. Free one port or set DATABASE_URL in agenthub/.env.'
 }
-Write-Host 'PostgreSQL OK.'
+Set-DotEnvValue 'DATABASE_URL' "postgresql+asyncpg://agenthub:agenthub@127.0.0.1:$dbPort/agenthub"
+Write-Host "PostgreSQL OK (127.0.0.1:$dbPort)."
 
 # 4) Backend
 $backendProc = $null
@@ -171,6 +249,11 @@ if ($node -eq $null) {
 $viteBin = Join-Path $frontendDir 'node_modules\vite\bin\vite.js'
 if (-not (Test-Path $viteBin)) {
     throw 'frontend/node_modules is missing. Run: cd frontend; npm install'
+}
+foreach ($module in @('vue', 'vue-router', 'mammoth', 'pdfjs-dist')) {
+    if (-not (Test-Path (Join-Path $frontendDir "node_modules\$module"))) {
+        throw "frontend/node_modules is out of date (missing $module). Run: cd frontend; npm install"
+    }
 }
 
 $frontendProc = $null

@@ -856,6 +856,8 @@ external
 
 V1 后端单实例部署。
 
+> 本地开发说明：`dev.ps1` 会优先复用 `127.0.0.1:5432` 上凭据可用（`agenthub/agenthub`）的 PostgreSQL；若该端口被本机其他 PostgreSQL 占用，则用 `AGENTHUB_DB_PORT=5433` 启动项目容器，并把 `DATABASE_URL` 写入 `agenthub/.env`。
+
 原因：
 
 ```text

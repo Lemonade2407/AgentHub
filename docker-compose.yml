@@ -7,7 +7,8 @@ services:
       POSTGRES_USER: agenthub
       POSTGRES_PASSWORD: agenthub
     ports:
-      - "5432:5432"
+      # 5432 被本机其他 PostgreSQL 占用时，可用 AGENTHUB_DB_PORT=5433 覆盖
+      - "${AGENTHUB_DB_PORT:-5432}:5432"
     volumes:
       - agenthub_pgdata:/var/lib/postgresql/data
     healthcheck:
