@@ -306,6 +306,8 @@ async def _ensure_servers(session: AsyncSession) -> list[McpServer]:
                     transport="streamable_http",
                     description=item["description"],
                     enabled=True,
+                    # 历史建表脚本没有数据库默认值，显式写入
+                    status="UNKNOWN",
                 )
             )
             session.add(server)

@@ -43,6 +43,9 @@ class McpServerRepository:
             headers=data.headers,
             enabled=True,
             status=McpServerStatus.UNKNOWN.value,
+            # 兼容旧版建表：显式写入时间戳，避免依赖数据库默认值
+            created_at=utcnow(),
+            updated_at=utcnow(),
         )
         self._session.add(server)
         await self._session.flush()
@@ -306,6 +309,9 @@ class McpToolRepository:
                     input_schema=tool.input_schema,
                     risk_level=tool.risk_level.value,
                     enabled=tool.enabled,
+                    # 兼容旧版建表：显式写入时间戳，避免依赖数据库默认值
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
                 )
             )
             return ToolUpsertOutcome.ADDED
