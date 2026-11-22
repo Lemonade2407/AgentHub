@@ -16,7 +16,7 @@ import {
   updateMessage,
   type ChatMessage,
 } from '../stores/conversations'
-import type { Agent, Page, RunRead, StepRead, TraceEvent } from '../types/api'
+import type { Agent, ModelApiOption, Page, RunRead, StepRead, TraceEvent } from '../types/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -346,6 +346,30 @@ function closeStream() {
 function syncSelectedModel() {
   // 模型不再绑定在 Agent 上，沿用用户在对话窗口上一次的选择
   selectedModel.value = localStorage.getItem('agenthub.lastModel') ?? ''
+  if (!selectedModel.value) void ensureDefaultModel()
+}
+
+/** 首次使用时自动选中第一个可用模型（优先默认模型），免去手动选择。 */
+async function ensureDefaultModel() {
+  if (selectedModel.value) return
+  try {
+    const raw = await api.get<ModelApiOption[] | { items: ModelApiOption[] }>(
+      '/api/model-apis/available',
+    )
+    const tree = Array.isArray(raw) ? raw : (raw.items ?? [])
+    for (const apiItem of tree) {
+      const models = (apiItem.models ?? []).filter((model) => model.enabled !== false)
+      const chosen = models.find((model) => model.is_default) ?? models[0]
+      if (chosen) {
+        const value = `${apiItem.provider}/${chosen.model_key}`
+        selectedModel.value = value
+        localStorage.setItem('agenthub.lastModel', value)
+        return
+      }
+    }
+  } catch {
+    // 没有可用模型时保持为空，发送时会提示去配置
+  }
 }
 
 function onAgentChange(id: number) {
@@ -387,6 +411,7 @@ async function send() {
   }
   const text = input.value.trim()
   if (!text || isRunning.value) return
+  if (!selectedModel.value) await ensureDefaultModel()
   const model = selectedModel.value || ''
   if (!model) {
     error.value = '请先选择模型'

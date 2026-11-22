@@ -11,12 +11,13 @@ Agent 与 Skill 是数据库记录，不随代码仓库分发；新环境启动�
 运行前提：后端已完成建表，且本地 MCP Server（8100/8102/8103）已启动，
 否则 Tool 发现会失败（此时仍会创建 Server/Skill/Agent，只是缺少工具绑定）。
 
-用法::
+平台启动时会自动检测：若数据库中一个内置 Agent 都不存在，就在后台自动执行一次；
+也可以手动执行::
 
     cd agenthub
-    .venv\\Scripts\\python -m app.db.seed
+    .\\.venv\\Scripts\\python.exe -m app.db.seed
 
-`dev.ps1` 在启动全部服务后会自动调用一次。
+`dev.ps1` 负责启动服务，不再单独调用本脚本。
 """
 
 from __future__ import annotations
@@ -236,6 +237,9 @@ DEMO_MODEL = {
     "display_name": "Demo Chat",
     "capabilities": {"tool_call": True, "context_window": 32000},
 }
+
+#: 判断是否需要初始化：这些内置 Agent 一个都不存在时才会写入，避免覆盖用户修改
+BUILTIN_AGENT_NAMES: tuple[str, ...] = tuple(item["name"] for item in AGENTS)
 
 
 def _touch(obj: Any) -> Any:

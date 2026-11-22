@@ -130,9 +130,27 @@ function Stop-ProcessTree([System.Diagnostics.Process]$Proc) {
 
 Write-Host '== AgentHub dev launcher =='
 
-# 1) Python venv
+# 1) Python venv（不存在时自动创建并安装依赖）
 if (-not (Test-Path $python)) {
-    throw "Python venv not found: $python. Create it with: cd agenthub; python -m venv .venv; .venv\Scripts\pip install -e ."
+    Write-Host 'Python venv not found; creating and installing backend dependencies ...'
+    $pyCmd = Get-Command py -ErrorAction SilentlyContinue
+    Push-Location $backendDir
+    try {
+        if ($pyCmd -ne $null) {
+            & $pyCmd.Source -3 -m venv (Join-Path $backendDir '.venv')
+        } else {
+            & python -m venv (Join-Path $backendDir '.venv')
+        }
+        if (-not (Test-Path $python)) {
+            throw "Failed to create venv at $python. Install Python 3.12+ and retry."
+        }
+        & $python -m pip install -e '.[dev]'
+        if ($LASTEXITCODE -ne 0) {
+            throw 'pip install failed. Check network / configure a pip mirror and retry.'
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 # 1.1) Keep venv in sync with pyproject (new deps such as cryptography must exist)
@@ -247,12 +265,39 @@ if ($node -eq $null) {
 }
 
 $viteBin = Join-Path $frontendDir 'node_modules\vite\bin\vite.js'
-if (-not (Test-Path $viteBin)) {
-    throw 'frontend/node_modules is missing. Run: cd frontend; npm install'
+$requiredModules = @('vue', 'vue-router', 'mammoth', 'pdfjs-dist')
+$depsMissing = -not (Test-Path $viteBin)
+if (-not $depsMissing) {
+    foreach ($module in $requiredModules) {
+        if (-not (Test-Path (Join-Path $frontendDir "node_modules\$module"))) {
+            $depsMissing = $true
+            break
+        }
+    }
 }
-foreach ($module in @('vue', 'vue-router', 'mammoth', 'pdfjs-dist')) {
+if ($depsMissing) {
+    Write-Host 'Installing frontend dependencies (npm install) ...'
+    $npmCmd = Join-Path (Split-Path -Parent $node) 'npm.cmd'
+    Push-Location $frontendDir
+    try {
+        if (Test-Path $npmCmd) {
+            & $npmCmd install
+        } else {
+            & npm install
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'npm install failed. Check network / configure an npm mirror and retry.'
+        }
+    } finally {
+        Pop-Location
+    }
+}
+if (-not (Test-Path $viteBin)) {
+    throw 'frontend dependencies are still missing after npm install.'
+}
+foreach ($module in $requiredModules) {
     if (-not (Test-Path (Join-Path $frontendDir "node_modules\$module"))) {
-        throw "frontend/node_modules is out of date (missing $module). Run: cd frontend; npm install"
+        throw "frontend/node_modules is out of date (missing $module) even after npm install."
     }
 }
 
@@ -395,17 +440,8 @@ if (-not (Test-Port 8101)) {
     Write-Host 'Demo LLM already running on 8101.'
 }
 
-# 6.5) Seed demo data (idempotent; needs the local MCP servers above to discover tools)
-Write-Host 'Seeding demo data (MCP servers / Skills / Agents) ...'
-Push-Location $backendDir
-try {
-    & $python -m app.db.seed
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Seed failed with exit code $LASTEXITCODE (services keep running)."
-    }
-} finally {
-    Pop-Location
-}
+# 6.5) Demo data is seeded automatically by the backend on first startup
+#      (see app/main.py: _auto_seed_demo_data)
 
 # 7) Open browser
 if (-not $NoBrowser) {

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -45,6 +46,7 @@ async def lifespan(app: FastAPI):
         await create_schema()
     await _ensure_workspaces()
     await _cleanup_old_runs(settings.run_retention_days)
+    seed_task = asyncio.create_task(_auto_seed_demo_data())
 
     client_factory = HttpMcpClientFactory()
     broker = SSEBroker()
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        seed_task.cancel()
         await client_factory.aclose()
         await engine.dispose()
 
@@ -106,6 +109,69 @@ async def _cleanup_old_runs(retention_days: int) -> None:
         )
     except Exception:  # 清理失败不应阻断平台启动
         logging.getLogger(__name__).exception("清理历史 Run 失败")
+
+
+async def _auto_seed_demo_data() -> None:
+    """首次启动时自动写入内置 Agent / Skill（后台执行，不阻塞启动）。
+
+    仅当数据库中一个内置 Agent 都不存在时才执行，避免覆盖用户后续修改。
+    """
+    from sqlalchemy import func, select
+
+    from app.db.seed import BUILTIN_AGENT_NAMES, seed_demo_data
+    from app.db.session import SessionFactory as _SessionFactory
+    from app.models.agent import Agent
+
+    log = logging.getLogger(__name__)
+    try:
+        async with _SessionFactory() as session:
+            existing = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(Agent)
+                    .where(
+                        Agent.deleted_at.is_(None),
+                        Agent.name.in_(sorted(BUILTIN_AGENT_NAMES)),
+                    )
+                )
+            ).scalar_one()
+        if existing:
+            return
+
+        # dev.ps1 先启动后端再启动本地 MCP，等待它们在后台就绪后再做工具发现
+        ready = await _wait_for_ports((8100, 8102, 8103), timeout_s=60.0)
+        if not ready:
+            log.warning("本地 MCP Server 未全部就绪，示例数据可能缺少工具绑定")
+
+        async with _SessionFactory() as session:
+            summary = await seed_demo_data(session)
+        log.info("示例数据自动初始化完成：%s", summary)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # 初始化失败不应阻断平台启动
+        log.exception("自动初始化示例数据失败")
+
+
+async def _wait_for_ports(
+    ports: tuple[int, ...], *, host: str = "127.0.0.1", timeout_s: float = 60.0
+) -> bool:
+    """等待本机端口全部可连接，用于确认本地 MCP Server 已启动。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    pending = set(ports)
+    while pending and loop.time() < deadline:
+        for port in list(pending):
+            try:
+                _reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port), timeout=1.0
+                )
+                writer.close()
+                pending.discard(port)
+            except Exception:
+                continue
+        if pending:
+            await asyncio.sleep(2)
+    return not pending
 
 
 app = FastAPI(
